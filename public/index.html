@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0a">
+    <title>YouTube Music Queue Remote</title>
+    <link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png">
+    <link rel="apple-touch-icon" href="/icons/icon-192.png">
+    <link rel="manifest" href="/manifest.webmanifest?v=2">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="lyric.css">
+    <link rel="stylesheet" href="index-styles.css">
+    
+</head>
+<body class="page-enter">
+    <audio id="audioPlayer" crossorigin="anonymous" style="display:none"></audio>
+    <!-- Floating Popout Toggle Button (only visible in popout mode) -->
+    <button id="popout-toggle-btn" onclick="toggleMobileSection()" style="display:none;position:fixed;bottom:24px;right:24px;z-index:9999;background:#313131;color:#fff;border:none;border-radius:50%;width:24px;height:24px;cursor:pointer;align-items:center;justify-content:center;font-size:28px;transition:background 0.2s;">
+      <span class="material-icons" id="popout-toggle-icon">list</span>
+    </button>
+    <!-- Mobile interaction hint popup -->
+    <div id="mobile-hint-popup" style="display:none;"></div>
+    <!-- Main Layout Container -->
+    <div id="layout-container">
+        <!-- Left Section -->
+        <div id="left-section">
+            <!-- Now Playing Section -->
+            <div id="nowplaying">
+                <!-- Left Section: Now Playing -->
+                <div style="display: flex; align-items: center;">
+                    <img id="nowplaying-thumbnail" class="thumbnail" />
+                    <div>
+                        <div id="nowplaying-title" class="title"></div>
+                        <div style="display: flex;">
+                            <div id="nowplaying-artist" class="artist-album"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right Section: Playback Controls -->
+                <div class="playback-controls" style="display: flex; align-items: center;">
+                    
+                    <button class="control-button" onclick="clearQueue()">
+                        <span class="material-icons">delete_forever</span>
+                    </button>
+                    <button class="control-button" onclick="shuffleQueue()">
+                        <span class="material-icons">shuffle</span>
+                    </button>
+                    <button class="control-button" onclick="previousTrack()">
+                        <span class="material-icons">skip_previous</span>
+                    </button>
+                    <button class="control-button" onclick="togglePlay()">
+                        <span class="material-icons" id="play-pause-icon">play_arrow</span>
+                    </button>
+                    <button class="control-button" onclick="nextTrack()">
+                        <span class="material-icons">skip_next</span>
+                    </button>
+                </div>
+            </div>
+
+            
+            <progress id="nowplaying-progress" value="0" max="100"></progress>
+            <div id="nowplaying-time" style="padding: 10px; font-size: 12px; color: #fd0234; background-color: #2424245e;"></div>
+            
+            <div id="queue-stats"></div>
+            <!-- Queue Container -->
+             
+            <div id="queue-container">
+                <div id="queue"></div>
+            </div>
+            <div id="log">[v.0.4] Youtube Music Remote made with love by Necra <3</div>
+        </div>
+
+        <!-- Right Section -->
+        <div id="right-section" class="lyrics-expanded">
+            <div id="toast"></div>
+            <div id="right-section-overlay"></div>
+
+            <!-- Floating search that expands on hover -->
+            <div id="floating-search">
+                <div id="search-bar">
+                    <input type="text" id="unified-input" placeholder="Search YouTube Music or paste a URL..." />
+                    <button id="unified-button" onclick="handleUnifiedInput()">
+                        <span class="material-icons">search</span>
+                    </button>
+                    <button id="popout-button" title="Popout Right Section" onclick="openPopoutWindow()" style=" background:#222; color:#fd0234; border:none; border-radius:8px; padding:8px; cursor:pointer; display:flex; align-items:center; gap:4px;">
+                        <span class="material-icons">open_in_new</span>
+                    </button>
+                </div>
+                <!-- Search Results (moved here, right after search-bar) -->
+                <div id="search-results">
+                    <div id="search-results-header">
+                        <div id="search-tabs">
+                            <button id="music-tab" class="search-tab active" onclick="switchTab('music')">Music</button>
+                            <button id="videos-tab" class="search-tab" onclick="switchTab('videos')">Videos</button>
+                        </div>
+                        <button id="hide-button" onclick="toggleSearchResults()">hide search</button>
+                    </div>
+                    <div id="search-results-tabs">
+                        <div id="music-results" class="tab-content active"></div>
+                        <div id="videos-results" class="tab-content"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Mirror of left progress bar for mobile (visible via CSS on small screens) -->
+            <progress id="right-nowplaying-progress" value="0" max="100" style="display:none;" ></progress>
+
+            <div id="right-now-playing">
+                <div id="right-bg-blur"></div>
+                <div id="right-now-playing-content">
+                    <img id="right-now-playing-cover" class="cover" src="" alt="Album Cover">
+                    <div class="info">
+                        <div id="right-now-playing-title" class="title"></div>
+                        <div id="right-now-playing-artist" class="artist"></div>
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- Lyrics stay expanded by default -->
+            <div id="top-buttons" style="display: flex; gap: 10px; justify-content: flex-end; align-items: center;">
+                  <div style="display:flex;align-items:center;gap:8px;">
+                <button id="floating-lyrics-download-btn" class="top-action-btn icon-only desktop-only left" title="Download Floating Lyrics">
+                    <span class="material-icons stream-icon">download</span>
+                </button>
+                <!-- Desktop only: Floating lyrics buttons -->
+                <button id="floating-lyrics-btn" class="top-action-btn desktop-only right" title="Floating lyrics">
+                    <span class="stream-label">FLOATING LYRICS</span>
+                    <span class="material-icons stream-icon">open_in_new</span>
+                </button>
+                <!-- Mobile only: Popout lyrics button -->
+                <button id="popout-lyrics-btn" class="top-action-btn mobile-only" title="Popout Lyrics" onclick="window.open('/lyrics.html', 'yt-lyrics-popout', 'width=480,height=' + window.screen.availHeight + ',left=0,top=0,resizable=yes,scrollbars=yes')">
+                    <span class="stream-label">POPOUT LYRICS</span>
+                    <span class="material-icons stream-icon">open_in_new</span>
+                </button>
+                <button id="stream-btn" class="top-action-btn" title="Stream audio" onclick="toggleStream()">
+                    <span class="stream-label">STREAM AUDIO</span>
+                    <span class="material-icons stream-icon">graphic_eq</span>
+                </button>
+            </div>
+            <button id="lyrics-collapse-btn" onclick="toggleLyricsCollapse()" title="Collapse lyrics">
+                <span class="material-icons">keyboard_arrow_down</span>
+            </button>
+            
+          
+            </div>
+
+            <!-- Audio Visualizer with integrated status -->
+<div id="audio-visualizer" style="display: none;">
+    <canvas id="visualizer-canvas"></canvas>
+    <div id="visualizer-status">Ready</div>
+    <div class="swyh-volume-control">
+    <input type="range" id="swyh-volume" class="swyh-volume-slider"  min="0" max="200" value="100">
+    <span id="volume-value">100%</span>
+</div>
+</div>
+
+            <div id="lyrics-container" class="expanded visible">
+                <div id="lyrics-container-bg"></div>
+                <div id="lyrics-content">
+                    <div id="lyrics-loading" class="lyrics-loading">
+                        <div class="loading-spinner"></div>
+                        <span>Loading lyrics...</span>
+                    </div>
+                    <div id="synced-lyrics"></div>
+                    <div id="plain-lyrics"></div>
+                </div>
+            </div>
+            <div id="lyrics-font-controls">
+                <button id="lyrics-font-up-btn" class="lyrics-font-btn" title="Increase lyrics font size">
+                    <span class="material-icons">add</span>
+                </button>
+                <button id="lyrics-font-down-btn" class="lyrics-font-btn" title="Decrease lyrics font size">
+                    <span class="material-icons">remove</span>
+                </button>
+            </div>
+
+            <div id="bottom-controls">
+                <div class="bottom-transport">
+                    <button class="control-button" onclick="previousTrack()">
+                        <span class="material-icons">skip_previous</span>
+                    </button>
+                    <button class="control-button play-pause" onclick="togglePlay()">
+                        <span class="material-icons" id="right-play-pause-icon">play_arrow</span>
+                    </button>
+                    <button class="control-button" onclick="nextTrack()">
+                        <span class="material-icons">skip_next</span>
+                    </button>
+                    
+                </div>
+                <div class="volume-control">
+                    <input type="range" class="volume-slider" min="1" max="100" value="1">
+                    <button class="volume-icon-button" onclick="toggleMute()">
+                        <span class="material-icons">volume_up</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+
+  <script type="module" src="scripts/main.js"></script>  
+
+
+
+</body>
+</html>
