@@ -1,3 +1,6 @@
+*.bat
+*.vbs
+
 # Logs
 logs
 *.log
