@@ -2,6 +2,16 @@
 export const API_URL = '/api/v1';
 export const MAX_RECONNECT_ATTEMPTS = 10;
 export const YT_API_KEY = globalThis.YT_API_KEY || '';
+export const RAPIDAPI_HOST = 'youtube-music-api3.p.rapidapi.com';
+export const RAPIDAPI_KEY = globalThis.RAPIDAPI_KEY || '6e9c0a131fmshb2c000221e56a88p1505d8jsn8afc28ef47a5';
+
+export function hasUsableYouTubeApiKey() {
+    return Boolean(YT_API_KEY) && !/YOUR_|REPLACE|CHANGEME/i.test(String(YT_API_KEY));
+}
+
+export function hasUsableRapidApiKey() {
+    return Boolean(RAPIDAPI_KEY) && !/YOUR_|REPLACE|CHANGEME/i.test(String(RAPIDAPI_KEY));
+}
 
 // Shared state
 export const state = {
@@ -11,6 +21,9 @@ export const state = {
     isSyncedLyrics: false,
     lastFetchedVideoId: null,
     currentFetchVideoId: null,
+    lastLyricsRequestKey: null,
+    lyricsCandidateOffset: 0,
+    lyricsCandidateTotal: 0,
     isPaused: false,
     currentSongData: null,
     currentPlayingIndex: null,
@@ -75,6 +88,9 @@ export function resetSongState() {
     state.lyricsOffset = 0;
     state.lastFetchedVideoId = null;
     state.currentFetchVideoId = null;
+    state.lastLyricsRequestKey = null;
+    state.lyricsCandidateOffset = 0;
+    state.lyricsCandidateTotal = 0;
     state.lastProgressUpdate = 0;
     state.lastServerProgressAt = 0;
     state.serverProgressBaseAt = 0;

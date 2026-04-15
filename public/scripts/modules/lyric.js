@@ -4,22 +4,117 @@ let lastRenderedLyricIndex = -1;
 let lastRenderedLyricsExpanded = null;
 const MUSIC_NOTE_SYMBOL = '\u266A';
 const GAP_FILL_BASE_THRESHOLD_SECONDS = 20;
-const GAP_FILL_THRESHOLD_PER_WORD_SECONDS = 1;
-const FINAL_BLANK_MIN_GAP_SECONDS = 3;
 const FINAL_BLANK_TARGET_GAP_SECONDS = 5;
-const ACTIVE_LYRIC_TIME_OFFSET_SECONDS = 0;
-const SYNCED_LYRIC_PARSE_OFFSET_SECONDS = 1.0;
+// Apply a small runtime lead without rewriting provider timestamps.
+const LYRICS_OFFSET_SECONDS = -1;
 const LYRIC_BACKWARD_SEEK_THRESHOLD_SECONDS = 2.0;
-const AUTO_CENTER_TOLERANCE_PX = 3;
+const LYRIC_INDEX_HYSTERESIS_SECONDS = 0;
+const AUTO_CENTER_TOLERANCE_PX = 6;
+const AUTO_CENTER_RETARGET_DEADZONE_PX = 8;
 let lyricLineElements = [];
 let lyricsRenderVersion = 0;
 let lastStableLyricEffectiveTime = null;
 let latchedBlankCutoffIndex = -1;
+let pendingLeavingCurrentAnimationFrame = 0;
 const LYRIC_DISPLAY_MODES = new Set(['scroll', 'fixed-3', 'fixed-2', 'fixed-1']);
+const LYRICS_CONTAINER_EXIT_DURATION_MS = 1000;
 let currentLyricDisplayMode = 'scroll';
 let lastRenderedLyricDisplayMode = 'scroll';
 let compactNoLyricsLeavingTimer = null;
 let compactNoLyricsEnteringTimer = null;
+let lyricsContainerHideTimer = null;
+let lyricModeSwitchRevealFrame = 0;
+const activeScrollAnimations = new WeakMap();
+const fixedLineHideTimers = new WeakMap();
+const scrollBlankFadeFrames = new WeakMap();
+const BLANK_CUTOFF_HIDE_DELAY_MS = 2000;
+
+function isBlankCutoffEnabledForCurrentPage() {
+    const viewportWidth = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
+    const isPhoneLayout = !!document.documentElement?.classList?.contains('is-phone-layout');
+    if (viewportWidth <= 767 || isPhoneLayout) {
+        return false;
+    }
+    // Default to enabled unless the page explicitly disables it.
+    return window.__lyricsBlankCutoffEnabled !== false;
+}
+
+function applyLyricsTimingOffset(currentTimeSeconds) {
+    const numericTime = Number(currentTimeSeconds);
+    if (!Number.isFinite(numericTime)) return 0;
+    // Negative offset means show lyrics earlier than playback.
+    return Math.max(0, numericTime - LYRICS_OFFSET_SECONDS);
+}
+
+function clearPendingLyricsContainerHide() {
+    if (lyricsContainerHideTimer) {
+        clearTimeout(lyricsContainerHideTimer);
+        lyricsContainerHideTimer = null;
+    }
+}
+
+async function fetchFreshSongElapsedForRender(expectedVideoId, fallbackElapsed = 0) {
+    const normalizedExpectedVideoId = (expectedVideoId === undefined || expectedVideoId === null)
+        ? ''
+        : String(expectedVideoId).trim();
+    const fallback = Number.isFinite(Number(fallbackElapsed)) ? Math.max(0, Number(fallbackElapsed)) : 0;
+    if (!normalizedExpectedVideoId) return fallback;
+
+    try {
+        const response = await fetch(`${API_URL}/song`, { cache: 'no-store' });
+        if (!response.ok) return fallback;
+
+        const payload = await response.json().catch(() => null);
+        const payloadVideoId = String(payload?.videoId || '').trim();
+        if (!payloadVideoId || payloadVideoId !== normalizedExpectedVideoId) {
+            return fallback;
+        }
+
+        const elapsed = Number(payload?.elapsedSeconds);
+        if (!Number.isFinite(elapsed)) return fallback;
+
+        if (state.currentSongData && String(state.currentSongData.videoId || '').trim() === normalizedExpectedVideoId) {
+            const localElapsed = Number(state.currentSongData.elapsedSeconds);
+            const safeLocalElapsed = Number.isFinite(localElapsed) ? Math.max(0, localElapsed) : 0;
+            const nextElapsed = Math.max(safeLocalElapsed, elapsed);
+            state.currentSongData = {
+                ...state.currentSongData,
+                ...payload,
+                elapsedSeconds: nextElapsed
+            };
+        }
+
+        return Math.max(fallback, elapsed);
+    } catch (_) {
+        return fallback;
+    }
+}
+
+function cancelPendingLyricModeReveal() {
+    if (lyricModeSwitchRevealFrame) {
+        cancelAnimationFrame(lyricModeSwitchRevealFrame);
+        lyricModeSwitchRevealFrame = 0;
+    }
+}
+
+function beginLyricModeSwitchMask() {
+    const lyricsContainer = document.getElementById('lyrics-container');
+    if (!lyricsContainer) return;
+    cancelPendingLyricModeReveal();
+    lyricsContainer.classList.add('mode-switching');
+}
+
+function endLyricModeSwitchMaskSoon() {
+    const lyricsContainer = document.getElementById('lyrics-container');
+    if (!lyricsContainer) return;
+    cancelPendingLyricModeReveal();
+    lyricModeSwitchRevealFrame = requestAnimationFrame(() => {
+        lyricModeSwitchRevealFrame = requestAnimationFrame(() => {
+            lyricModeSwitchRevealFrame = 0;
+            lyricsContainer.classList.remove('mode-switching');
+        });
+    });
+}
 
 function setCompactNoLyricsState(enabled) {
     const body = document.body;
@@ -66,21 +161,6 @@ function setCompactNoLyricsState(enabled) {
     }, 220);
 }
 
-function isBlankCutoffEnabledForCurrentPage() {
-    const viewportWidth = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
-    const isPhoneLayout = !!document.documentElement?.classList?.contains('is-phone-layout');
-    if (viewportWidth <= 767 || isPhoneLayout) {
-        return false;
-    }
-    return !!window.__lyricsBlankCutoffEnabled;
-}
-
-function getLeadingGhostLinesCountForCurrentPage() {
-    const raw = Number(window.__lyricsLeadingGhostLinesCount);
-    if (!Number.isFinite(raw)) return 0;
-    return Math.max(0, Math.floor(raw));
-}
-
 function countLyricWords(text) {
     if (!text || typeof text !== 'string') return 0;
     const trimmed = text.trim();
@@ -95,12 +175,88 @@ function countLyricWords(text) {
 }
 
 function refreshLyricLineElements() {
-    lyricLineElements = Array.from(document.querySelectorAll('#synced-lyrics .lyric-line, #plain-lyrics .lyric-line'));
+    lyricLineElements = Array.from(document.querySelectorAll('#synced-lyrics .lyric-line, #plain-lyrics .lyric-line'))
+        .sort((a, b) => {
+            const aIndex = Number.parseInt(a?.dataset?.index || '-1', 10);
+            const bIndex = Number.parseInt(b?.dataset?.index || '-1', 10);
+            return aIndex - bIndex;
+        });
     return lyricLineElements;
 }
 
 function clearLyricLineElementsCache() {
     lyricLineElements = [];
+}
+
+function cancelPendingLeavingCurrentAnimation() {
+    if (pendingLeavingCurrentAnimationFrame) {
+        cancelAnimationFrame(pendingLeavingCurrentAnimationFrame);
+        pendingLeavingCurrentAnimationFrame = 0;
+    }
+}
+
+function clearScheduledFixedLineHide(line) {
+    if (!line) return;
+    const timerId = fixedLineHideTimers.get(line);
+    if (timerId) {
+        clearTimeout(timerId);
+        fixedLineHideTimers.delete(line);
+    }
+}
+
+function cancelScheduledScrollBlankFade(line) {
+    if (!line) return;
+    const rafId = scrollBlankFadeFrames.get(line);
+    if (rafId) {
+        cancelAnimationFrame(rafId);
+        scrollBlankFadeFrames.delete(line);
+    }
+}
+
+function scheduleScrollBlankFade(line) {
+    if (!line) return;
+    if (line.classList.contains('hidden-after-blank')) return;
+    cancelScheduledScrollBlankFade(line);
+    line.classList.add('blank-fade-pending');
+    const rafId = requestAnimationFrame(() => {
+        scrollBlankFadeFrames.delete(line);
+        if (!line?.isConnected) return;
+        line.classList.remove('blank-fade-pending');
+        line.classList.add('hidden-after-blank');
+    });
+    scrollBlankFadeFrames.set(line, rafId);
+}
+
+function scheduleFixedLineHide(line, delayMs = BLANK_CUTOFF_HIDE_DELAY_MS) {
+    if (!line) return;
+    clearScheduledFixedLineHide(line);
+    const timeoutMs = Math.max(0, Number(delayMs) || 0);
+    if (timeoutMs === 0) {
+        line.classList.add('fixed-hidden');
+        line.classList.remove('fixed-leaving');
+        return;
+    }
+
+    line.classList.add('fixed-leaving');
+    const timerId = setTimeout(() => {
+        fixedLineHideTimers.delete(line);
+        if (!line?.isConnected) return;
+        line.classList.add('fixed-hidden');
+        line.classList.remove('fixed-leaving');
+    }, timeoutMs);
+    fixedLineHideTimers.set(line, timerId);
+}
+
+function scheduleLeavingCurrentRelease(linesToRelease) {
+    if (!Array.isArray(linesToRelease) || linesToRelease.length === 0) return;
+    cancelPendingLeavingCurrentAnimation();
+    pendingLeavingCurrentAnimationFrame = requestAnimationFrame(() => {
+        pendingLeavingCurrentAnimationFrame = 0;
+        linesToRelease.forEach((line) => {
+            if (!line?.isConnected) return;
+            line.classList.remove('leaving-current');
+        });
+    });
 }
 
 function normalizeLyricDisplayMode(mode) {
@@ -120,16 +276,39 @@ function updateLyricDisplayModeDomState(mode) {
 
 function shouldShowLineForDisplayMode(mode, currentIndex, lineIndex) {
     if (!Number.isFinite(currentIndex) || currentIndex < 0) {
-        if (mode === 'fixed-3') return lineIndex <= 2;
-        if (mode === 'fixed-2') return lineIndex <= 1;
-        if (mode === 'fixed-1') return lineIndex === 0;
-        return true;
+        // Before any lyric is active, hide all lines in fixed mode
+        // to prevent showing incorrect lines at wrong positions.
+        return false;
     }
     if (mode === 'fixed-3') return Math.abs(lineIndex - currentIndex) <= 1;
-    // fixed-2: show previous (top, inactive) + current (bottom, active)
-    if (mode === 'fixed-2') return lineIndex === (currentIndex - 1) || lineIndex === currentIndex;
+    // fixed-2: show current (active) + next (inactive, about to become active).
+    if (mode === 'fixed-2') return lineIndex === currentIndex || lineIndex === (currentIndex + 1);
     if (mode === 'fixed-1') return lineIndex === currentIndex;
     return true;
+}
+
+function reorderFixedModeVisibleLines(mode, currentIndex, lines) {
+    if (!Array.isArray(lines) || lines.length === 0) return;
+    if (!Number.isFinite(currentIndex) || currentIndex < 0) return;
+    if (mode === 'scroll' || mode === 'fixed-1') return;
+}
+
+function restoreNaturalLyricDomOrder(lines) {
+    if (!Array.isArray(lines) || lines.length === 0) return;
+    const parent = lines[0]?.parentElement;
+    if (!parent) return;
+
+    [...lines]
+        .sort((a, b) => {
+            const aIndex = Number.parseInt(a?.dataset?.index || '-1', 10);
+            const bIndex = Number.parseInt(b?.dataset?.index || '-1', 10);
+            return aIndex - bIndex;
+        })
+        .forEach((line) => {
+            if (line?.parentElement === parent) {
+                parent.appendChild(line);
+            }
+        });
 }
 
 export function getLyricDisplayMode() {
@@ -139,10 +318,16 @@ export function getLyricDisplayMode() {
 export function setLyricDisplayMode(mode, { refresh = true } = {}) {
     const nextMode = normalizeLyricDisplayMode(mode);
     const modeChanged = currentLyricDisplayMode !== nextMode;
+    if (modeChanged) {
+        beginLyricModeSwitchMask();
+    }
     currentLyricDisplayMode = nextMode;
     updateLyricDisplayModeDomState(nextMode);
 
-    if (!modeChanged) return currentLyricDisplayMode;
+    if (!modeChanged) {
+        endLyricModeSwitchMaskSoon();
+        return currentLyricDisplayMode;
+    }
 
     const lyricsContainer = document.getElementById('lyrics-container');
     if (lyricsContainer && nextMode !== 'scroll') {
@@ -156,6 +341,8 @@ export function setLyricDisplayMode(mode, { refresh = true } = {}) {
             updateLyricsDisplay(elapsed);
         }
     }
+
+    endLyricModeSwitchMaskSoon();
 
     return currentLyricDisplayMode;
 }
@@ -177,45 +364,124 @@ function getOffsetTopWithinContainer(element, container) {
     return element.offsetTop || 0;
 }
 
+function getStableCenterAnchor(lineElement) {
+    if (!lineElement) return null;
+    return lineElement.querySelector('.text-lyrics') || lineElement;
+}
+
+function getStableCenterTargetTop(lineElement, scrollContainer) {
+    if (!lineElement || !scrollContainer) return 0;
+
+    const anchorElement = getStableCenterAnchor(lineElement);
+    if (!anchorElement) return 0;
+
+    // getOffsetTopWithinContainer walks offsetParent chain — this correctly
+    // accounts for the padding-top on the scroll container.
+    const anchorOffsetTop = getOffsetTopWithinContainer(anchorElement, scrollContainer);
+
+    // For wrapped multi-line blocks align to the first rendered row only,
+    // not the vertical midpoint of the whole block height.
+    const computedStyle = window.getComputedStyle(lineElement);
+    const lineHeightPx = parseFloat(computedStyle.lineHeight) || lineElement.getBoundingClientRect().height;
+    const singleRowHeight = Math.min(lineHeightPx, lineElement.getBoundingClientRect().height);
+
+    // Center the first row in the viewport. The CSS padding-top/bottom on
+    // .scroll-line-mode guarantees even the first and last lines are reachable.
+    const viewportH = scrollContainer.clientHeight;
+    const targetTop = anchorOffsetTop + (singleRowHeight / 2) - (viewportH / 2);
+    const maxScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+
+    return Math.max(0, Math.min(maxScrollTop, targetTop));
+}
+
 function smoothScrollContainerTo(container, targetTop, behavior = 'smooth') {
     if (!container) return;
     if (Math.abs((container.scrollTop || 0) - targetTop) <= AUTO_CENTER_TOLERANCE_PX) return;
 
     if (behavior !== 'smooth') {
+        const existingAnimation = activeScrollAnimations.get(container);
+        if (existingAnimation?.rafId) {
+            cancelAnimationFrame(existingAnimation.rafId);
+        }
+        activeScrollAnimations.delete(container);
         container.scrollTop = targetTop;
         return;
     }
 
-    try {
-        container.scrollTo({
-            top: targetTop,
-            behavior
-        });
-    } catch (_) {
-        container.scrollTop = targetTop;
+    const existingAnimation = activeScrollAnimations.get(container);
+    const existingTargetTop = Number(existingAnimation?.targetTop);
+    if (Number.isFinite(existingTargetTop) && Math.abs(existingTargetTop - targetTop) < AUTO_CENTER_RETARGET_DEADZONE_PX) {
+        return;
     }
+
+    if (existingAnimation?.rafId) {
+        cancelAnimationFrame(existingAnimation.rafId);
+    }
+
+    // Always start from wherever the container currently sits — not from where
+    // the interrupted animation originally started. This prevents visual
+    // snap-backs when a new target arrives mid-scroll (common on wrapped lines).
+    const startTop = Number(container.scrollTop) || 0;
+    const delta = targetTop - startTop;
+    if (Math.abs(delta) <= AUTO_CENTER_TOLERANCE_PX) {
+        activeScrollAnimations.delete(container);
+        container.scrollTop = targetTop;
+        return;
+    }
+
+    const distance = Math.abs(delta);
+    // Keep duration generous and consistent — the buttery feel comes from
+    // a long deceleration tail, not from matching scroll distance exactly.
+    // Short hops (adjacent lines) get ~600ms, long seeks up to 800ms.
+    const durationMs = Math.max(600, Math.min(800, Math.round(distance * 0.6 + 600)));
+
+    // easeOutExpo: very fast onset (syncs with word-bounce) then a long,
+    // smooth deceleration tail — the "buttery" feel.
+    const easeOutExpo = (t) => t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
+
+    const animationState = {
+        rafId: 0,
+        targetTop
+    };
+    activeScrollAnimations.set(container, animationState);
+
+    const startTime = performance.now();
+    const tick = (now) => {
+        const latestAnimation = activeScrollAnimations.get(container);
+        if (latestAnimation !== animationState) return;
+
+        const progress = Math.max(0, Math.min(1, (now - startTime) / durationMs));
+        const eased = easeOutExpo(progress);
+        container.scrollTop = startTop + (delta * eased);
+
+        if (progress >= 1) {
+            container.scrollTop = targetTop;
+            activeScrollAnimations.delete(container);
+            return;
+        }
+
+        animationState.rafId = requestAnimationFrame(tick);
+    };
+
+    // Start immediately so the motion does not feel delayed.
+    tick(startTime);
 }
 
 export function centerActiveLyricLineStrict(currentIndex, lyricsContainer, options = {}) {
-    if (!lyricsContainer || currentIndex < 0) return;
-    if (lyricsContainer.classList.contains('collapsed')) return;
+    if (!lyricsContainer || getLyricDisplayMode() !== 'scroll') return;
 
-    const behavior = options?.behavior === 'instant' ? 'instant' : 'smooth';
+    const index = Number(currentIndex);
+    if (!Number.isFinite(index) || index < 0) return;
 
     const scrollContainer = getLyricsScrollContainer(lyricsContainer);
     if (!scrollContainer) return;
 
-    const lineElement = lyricsContainer.querySelector(`.lyric-line[data-index="${currentIndex}"]`);
+    const lineElement = lyricsContainer.querySelector(`.lyric-line[data-index="${index}"]`);
     if (!lineElement) return;
 
-    const lineOffsetTop = getOffsetTopWithinContainer(lineElement, scrollContainer);
-    const targetTop = lineOffsetTop - ((scrollContainer.clientHeight - lineElement.offsetHeight) / 2);
-    const maxScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
-    const clampedTargetTop = Math.max(0, Math.min(maxScrollTop, targetTop));
-
-    if (Math.abs(scrollContainer.scrollTop - clampedTargetTop) <= AUTO_CENTER_TOLERANCE_PX) return;
-
-    smoothScrollContainerTo(scrollContainer, clampedTargetTop, behavior);
+    const targetTop = getStableCenterTargetTop(lineElement, scrollContainer);
+    const behavior = options?.behavior === 'instant' ? 'instant' : 'smooth';
+    smoothScrollContainerTo(scrollContainer, targetTop, behavior);
 }
 
 function getWordStaggerSeconds(wordCount, { romanized = false } = {}) {
@@ -228,18 +494,29 @@ function getWordStaggerSeconds(wordCount, { romanized = false } = {}) {
     return staggerMs / 1000;
 }
 
-function applyActiveWordStagger(lineElement) {
-    if (!lineElement) return;
-    const words = lineElement.querySelectorAll('.lyric-word');
-    if (!words.length) return;
-
-    const staggerSeconds = getWordStaggerSeconds(words.length);
+function applyWordDelaySequence(words, staggerSeconds) {
+    if (!words || words.length === 0) return;
     words.forEach((word, index) => {
         const delay = `${(index * staggerSeconds).toFixed(3)}s`;
         word.style.willChange = 'opacity, transform';
-        word.style.transitionDelay = delay;
+        word.style.setProperty('--word-reveal-delay', delay);
+        word.style.transitionDelay = '0s';
         word.style.animationDelay = delay;
     });
+}
+
+function applyActiveWordStagger(lineElement) {
+    if (!lineElement) return;
+    const wordGroups = [
+        lineElement.querySelectorAll('.lyric-words .lyric-word'),
+        lineElement.querySelectorAll('.romanized .romanized-word'),
+        lineElement.querySelectorAll('.lyric-translation .translation-word')
+    ].filter((group) => group.length > 0);
+    if (wordGroups.length === 0) return;
+
+    const maxWordCount = Math.max(...wordGroups.map((group) => group.length));
+    const staggerSeconds = getWordStaggerSeconds(maxWordCount);
+    wordGroups.forEach((group) => applyWordDelaySequence(group, staggerSeconds));
 }
 
 function queueActivatingCurrentCleanup(lines) {
@@ -251,6 +528,67 @@ function queueActivatingCurrentCleanup(lines) {
             }, 50);
         });
     });
+}
+
+function findCurrentLyricIndexAtTime(lines, time) {
+    if (!Array.isArray(lines) || lines.length === 0) return -1;
+    const safeTime = Math.max(0, Number(time) || 0);
+
+    let currentIndex = -1;
+    let lo = 0;
+    let hi = lines.length - 1;
+    while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        const midTime = Number(lines[mid]?.time);
+        const safeMidTime = Number.isFinite(midTime) ? midTime : 0;
+        if (safeMidTime <= safeTime) {
+            currentIndex = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    return currentIndex;
+}
+
+function getLyricLineTime(lines, index) {
+    if (!Array.isArray(lines) || !Number.isFinite(index) || index < 0 || index >= lines.length) {
+        return null;
+    }
+    const time = Number(lines[index]?.time);
+    return Number.isFinite(time) ? time : null;
+}
+
+function stabilizeCurrentLyricIndex(lines, candidateIndex, effectiveTime, previousIndex, { didBackwardSeek = false } = {}) {
+    if (!Array.isArray(lines) || lines.length === 0) return candidateIndex;
+    if (!Number.isFinite(candidateIndex) || candidateIndex < 0) return candidateIndex;
+    if (!Number.isFinite(previousIndex) || previousIndex < 0) return candidateIndex;
+    if (candidateIndex === previousIndex) return candidateIndex;
+
+    const jumpDistance = Math.abs(candidateIndex - previousIndex);
+    if (jumpDistance > 1) return candidateIndex;
+
+    const hysteresis = LYRIC_INDEX_HYSTERESIS_SECONDS;
+    const previousLineTime = getLyricLineTime(lines, previousIndex);
+    const candidateLineTime = getLyricLineTime(lines, candidateIndex);
+
+    if (candidateIndex === previousIndex + 1) {
+        if (!Number.isFinite(candidateLineTime)) return candidateIndex;
+        return effectiveTime >= (candidateLineTime + hysteresis)
+            ? candidateIndex
+            : previousIndex;
+    }
+
+    if (candidateIndex === previousIndex - 1) {
+        if (didBackwardSeek) return candidateIndex;
+        if (!Number.isFinite(previousLineTime)) return candidateIndex;
+        return effectiveTime < (previousLineTime - hysteresis)
+            ? candidateIndex
+            : previousIndex;
+    }
+
+    return candidateIndex;
 }
 
 function applyDynamicLineAnimationVars(lineElement, durationMs) {
@@ -351,6 +689,65 @@ export function addRomanizedText(lineElement, romanizedText) {
     }
 }
 
+export function addLyricTranslation(lineElement, translationText) {
+    const isBlankLine = lineElement?.classList?.contains('music-note-line')
+        || lineElement?.dataset?.isBlankLine === 'true'
+        || !lineElement?.querySelector('.lyric-words');
+    if (isBlankLine) {
+        const existingBlankTranslation = lineElement?.querySelector('.lyric-translation');
+        if (existingBlankTranslation) {
+            existingBlankTranslation.remove();
+        }
+        lineElement?.classList?.remove('translation-assisted');
+        return;
+    }
+
+    const existing = lineElement.querySelector('.lyric-translation');
+    if (existing) {
+        existing.remove();
+    }
+
+    const translationSpan = document.createElement('span');
+    translationSpan.className = 'lyric-translation';
+    const parts = String(translationText || '').split(/(\s+)/).filter(p => p.length > 0);
+    const wordParts = parts.filter(part => !/^\s+$/.test(part));
+    const staggerSeconds = getWordStaggerSeconds(wordParts.length, { romanized: true });
+
+    if (wordParts.length === 0) {
+        return;
+    }
+
+    parts.forEach(part => {
+        if (/^\s+$/.test(part)) {
+            translationSpan.appendChild(document.createTextNode(part));
+        } else {
+            const w = document.createElement('span');
+            w.className = 'lyric-word translation-word';
+            const wordIndex = translationSpan.querySelectorAll('.translation-word').length;
+            const delay = wordIndex * staggerSeconds;
+            w.style.transitionDelay = `${delay}s`;
+            w.style.animationDelay = `${delay}s`;
+            w.textContent = part;
+            translationSpan.appendChild(w);
+        }
+    });
+
+    const wordContainer = lineElement.querySelector('.lyric-words');
+    const romanized = lineElement.querySelector('.romanized');
+    lineElement.classList.add('translation-assisted');
+    if (wordContainer && wordContainer.parentNode) {
+        wordContainer.parentNode.insertBefore(translationSpan, wordContainer.nextSibling);
+        return;
+    }
+
+    const textLyrics = lineElement.querySelector('.text-lyrics');
+    if (textLyrics) {
+        textLyrics.appendChild(translationSpan);
+    } else {
+        lineElement.appendChild(translationSpan);
+    }
+}
+
 // Lyrics fetching
 export async function fetchLyrics(artist, title, album = '', duration = 0, onSuccess, onError) {
     const normalizeVideoId = (v) => (v === undefined || v === null) ? '' : String(v).trim();
@@ -391,12 +788,16 @@ export async function fetchLyrics(artist, title, album = '', duration = 0, onSuc
     };
 
     try {
+        const excludedLanguages = Array.isArray(window.__lyricTranslationExcludedLanguages)
+            ? window.__lyricTranslationExcludedLanguages
+            : [];
         const params = new URLSearchParams({
             videoId: fetchVideoId,
             artist: artist,
             title: title,
             album: album || '',
-            duration: duration.toString()
+            duration: duration.toString(),
+            translationExclude: excludedLanguages.join(',')
         });
 
         const response = await fetch(`${API_URL}/lyrics?${params.toString()}`, {
@@ -429,6 +830,8 @@ export async function fetchLyrics(artist, title, album = '', duration = 0, onSuc
         }
 
         const data = result.data;
+        const provider = String(result.provider || data.provider || 'lrclib').trim().toLowerCase() || 'lrclib';
+        console.log(`[LYRICS] Server selected provider: ${provider}${result.cached ? ' (cache)' : ''}`);
         if (!isFetchStillValid()) {
             if (!isSameSong()) {
                 console.log('[LYRICS] Fetch completed but song changed; ignoring result');
@@ -475,7 +878,7 @@ export function updateLyricsDisplay(currentTime, options = {}) {
     if (!Number.isFinite(numericTime)) return;
     currentTime = Math.max(0, numericTime);
 
-    const rawEffectiveTime = Math.max(0, currentTime - ACTIVE_LYRIC_TIME_OFFSET_SECONDS);
+    const rawEffectiveTime = applyLyricsTimingOffset(currentTime);
     let didBackwardSeek = false;
     const effectiveTime = (() => {
         const prev = Number(lastStableLyricEffectiveTime);
@@ -500,52 +903,15 @@ export function updateLyricsDisplay(currentTime, options = {}) {
 
     if (!state.currentLyrics || state.currentLyrics.length === 0) return;
 
-    const lyricsLength = state.currentLyrics.length;
-    let currentIndex = -1;
-    if (lyricsLength > 0) {
-        let lo = 0;
-        let hi = lyricsLength - 1;
-        while (lo <= hi) {
-            const mid = Math.floor((lo + hi) / 2);
-            const midTime = Number(state.currentLyrics[mid]?.time);
-            const safeMidTime = Number.isFinite(midTime) ? midTime : 0;
-            if (safeMidTime <= effectiveTime) {
-                currentIndex = mid;
-                lo = mid + 1;
-            } else {
-                hi = mid - 1;
-            }
-        }
-    }
+    let currentIndex = findCurrentLyricIndexAtTime(state.currentLyrics, effectiveTime);
 
-    // Keep the frontend-injected leading placeholder active from 0s until the
-    // first actual lyric line starts, so the opening blank row never looks inactive.
-    if (lyricsLength > 0 && effectiveTime >= 0) {
-        let leadingSyntheticIndex = -1;
-        let firstActualLineTime = null;
-
-        for (let i = 0; i < lyricsLength; i += 1) {
-            const line = state.currentLyrics[i];
-            if (line?.isLeadingSynthetic) {
-                if (!line?.isGhostLeadingSynthetic) {
-                    leadingSyntheticIndex = i;
-                }
-                continue;
-            }
-
-            const lineTime = Number(line?.time);
-            firstActualLineTime = Number.isFinite(lineTime) ? lineTime : 0;
-            break;
-        }
-
-        if (
-            leadingSyntheticIndex >= 0
-            && Number.isFinite(firstActualLineTime)
-            && effectiveTime < firstActualLineTime
-        ) {
-            currentIndex = leadingSyntheticIndex;
-        }
-    }
+    currentIndex = stabilizeCurrentLyricIndex(
+        state.currentLyrics,
+        currentIndex,
+        effectiveTime,
+        lastRenderedLyricIndex,
+        { didBackwardSeek }
+    );
 
     const lyricsContainer = document.getElementById('lyrics-container');
     if (!lyricsContainer) return;
@@ -553,12 +919,12 @@ export function updateLyricsDisplay(currentTime, options = {}) {
     const displayMode = normalizeLyricDisplayMode(currentLyricDisplayMode);
     updateLyricDisplayModeDomState(displayMode);
     const isExpanded = lyricsContainer.classList.contains('expanded');
-    const leadingGhostCountForPage = getLeadingGhostLinesCountForCurrentPage();
 
     const hasActiveLineChanged = lastRenderedLyricIndex !== currentIndex;
     const hasExpandedModeChanged = lastRenderedLyricsExpanded !== isExpanded;
     const hasDisplayModeChanged = lastRenderedLyricDisplayMode !== displayMode;
     if (!hasActiveLineChanged && !hasExpandedModeChanged && !hasDisplayModeChanged) {
+        endLyricModeSwitchMaskSoon();
         return;
     }
 
@@ -584,10 +950,8 @@ export function updateLyricsDisplay(currentTime, options = {}) {
     const isFrontendBlankNote = (line) => {
         const text = (line?.text || '').toString().trim();
         const isNote = text === MUSIC_NOTE_SYMBOL;
-        const isBlankLike = !!line?.isEmpty || !!line?.isSourceBlank || text === '';
-        return isBlankLike
-            && (isNote || text === '')
-            && !line?.isLeadingSynthetic;
+        const isBlankLike = !!line?.isEmpty || !!line?.isSourceBlank || !!line?.isInjectedBlank || text === '';
+        return isBlankLike && (isNote || text === '') && !line?.isLeadingSynthetic;
     };
     const latestBlankCutoffIndex = (() => {
         let idx = -1;
@@ -611,10 +975,20 @@ export function updateLyricsDisplay(currentTime, options = {}) {
     const shouldApplyBlankCutoff = isBlankCutoffEnabledForCurrentPage() && activeBlankCutoffIndex >= 0;
 
     if (hasActiveLineChanged || hasExpandedModeChanged || hasDisplayModeChanged) {
-        const activatingLines = [];
+        const pendingLeavingCurrentLines = [];
+        const previousActiveIndex = Number.isFinite(lastRenderedLyricIndex) ? lastRenderedLyricIndex : -1;
+
         lines.forEach((line, index) => {
+            const wasCurrent = line.classList.contains('current');
+            const shouldHideAfterBlank = shouldApplyBlankCutoff && index < activeBlankCutoffIndex;
             line.classList.remove('current', 'previous', 'upcoming', 'before', 'after', 'far-before', 'far-after', 'activating-current');
-            line.classList.remove('hidden-after-blank', 'fixed-hidden', 'fixed-secondary');
+            line.classList.remove('fixed-secondary');
+            if (!shouldHideAfterBlank) {
+                line.classList.remove('hidden-after-blank');
+                line.classList.remove('blank-fade-pending');
+            }
+            clearScheduledFixedLineHide(line);
+            cancelScheduledScrollBlankFade(line);
             const relation = getLyricLineRelation(currentIndex, index);
             line.dataset.lineRelation = relation;
 
@@ -625,9 +999,21 @@ export function updateLyricsDisplay(currentTime, options = {}) {
             } else {
                 line.classList.add('current');
                 if (shouldAnimateActiveLine) {
+                    if (displayMode !== 'scroll') {
+                        line.classList.add('activating-current');
+                    }
                     applyActiveWordStagger(line);
-                    line.classList.add('activating-current');
-                    activatingLines.push(line);
+                }
+                line.classList.remove('leaving-current');
+            }
+
+            if (index !== currentIndex && shouldAnimateActiveLine && index === previousActiveIndex && wasCurrent) {
+                const shouldUseLeavingCurrent = !(displayMode === 'scroll' && shouldHideAfterBlank);
+                if (shouldUseLeavingCurrent) {
+                    line.classList.add('leaving-current');
+                    pendingLeavingCurrentLines.push(line);
+                } else {
+                    line.classList.remove('leaving-current');
                 }
             }
 
@@ -647,39 +1033,65 @@ export function updateLyricsDisplay(currentTime, options = {}) {
             if (displayMode !== 'scroll') {
                 const shouldShow = shouldShowLineForDisplayMode(displayMode, currentIndex, index);
                 if (!shouldShow) {
-                    line.classList.add('fixed-hidden');
+                    if (shouldHideAfterBlank) {
+                        line.classList.add('hidden-after-blank', 'fixed-leaving');
+                        line.classList.remove('fixed-hidden');
+                        scheduleFixedLineHide(line, BLANK_CUTOFF_HIDE_DELAY_MS);
+                    } else {
+                        line.classList.add('fixed-hidden');
+                        line.classList.remove('fixed-leaving');
+                    }
+                } else {
+                    line.classList.remove('fixed-hidden', 'fixed-leaving');
                 }
+            } else {
+                line.classList.remove('fixed-hidden', 'fixed-leaving');
             }
 
-            const sourceLine = state.currentLyrics[index];
-            if (shouldApplyBlankCutoff && index < activeBlankCutoffIndex && !sourceLine?.isLeadingSynthetic) {
-                line.classList.add('hidden-after-blank');
+            if (shouldHideAfterBlank) {
+                if (displayMode === 'scroll') {
+                    scheduleScrollBlankFade(line);
+                } else {
+                    line.classList.add('hidden-after-blank');
+                }
             }
         });
 
-        if (activatingLines.length > 0) {
-            queueActivatingCurrentCleanup(activatingLines);
+        scheduleLeavingCurrentRelease(pendingLeavingCurrentLines);
+
+        if (displayMode !== 'scroll') {
+            reorderFixedModeVisibleLines(displayMode, currentIndex, lines);
+            if (shouldAnimateActiveLine) {
+                queueActivatingCurrentCleanup(lines);
+            }
+        } else {
+            restoreNaturalLyricDomOrder(lines);
         }
 
         if ((hasActiveLineChanged || hasDisplayModeChanged || hasExpandedModeChanged) && displayMode === 'scroll') {
-            let leadingSyntheticPrefixCount = -1;
-            if (leadingGhostCountForPage > 0) {
-                for (let i = 0; i < state.currentLyrics.length; i += 1) {
-                    if (state.currentLyrics[i]?.isLeadingSynthetic) leadingSyntheticPrefixCount = i;
-                    else break;
-                }
+            const currentSourceLine = state.currentLyrics[currentIndex];
+            const isCurrentBlankCutoffLine = shouldApplyBlankCutoff && isFrontendBlankNote(currentSourceLine);
+            if (isCurrentBlankCutoffLine) {
+                lastRenderedLyricIndex = currentIndex;
+                lastRenderedLyricsExpanded = isExpanded;
+                lastRenderedLyricDisplayMode = displayMode;
+                endLyricModeSwitchMaskSoon();
+                return;
             }
-            const shouldSkipCenteringForLeadingGhost =
-                leadingGhostCountForPage > 0 && currentIndex <= leadingSyntheticPrefixCount + 1;
-            if (!shouldSkipCenteringForLeadingGhost) {
+            // Defer by one animation frame so the browser reflows the
+            // newly-applied .current class before we read offsetTop.
+            // This makes the scroll fire at the same frame as word-bounce,
+            // eliminating the "late" feeling.
+            requestAnimationFrame(() => {
                 centerActiveLyricLineStrict(currentIndex, lyricsContainer);
-            }
+            });
         }
     }
 
     lastRenderedLyricIndex = currentIndex;
     lastRenderedLyricsExpanded = isExpanded;
     lastRenderedLyricDisplayMode = displayMode;
+    endLyricModeSwitchMaskSoon();
 }
 
 export function getLyricLineRelation(currentIndex, lineIndex) {
@@ -693,11 +1105,18 @@ export function getLyricLineRelation(currentIndex, lineIndex) {
 // Shared lyrics rendering (used by scripts/main.js and scripts/lyrics.js)
 // ------------------------------------------------------------
 
-function buildWordAnimatedLine(text, { index = 0, needsRomanization = false, isMusicNote = false, prefetchedRomanized = '' } = {}) {
+function buildWordAnimatedLine(text, {
+    index = 0,
+    needsRomanization = false,
+    isMusicNote = false,
+    prefetchedRomanized = '',
+    prefetchedTranslation = ''
+} = {}) {
     const div = document.createElement('div');
     div.className = 'lyric-line synced-line';
     div.dataset.index = index;
     div.dataset.original = (text || '').toString();
+    div.dataset.isBlankLine = isMusicNote ? 'true' : 'false';
 
     if (needsRomanization) div.classList.add('romanizable');
     if (isMusicNote) div.classList.add('music-note-line');
@@ -744,250 +1163,132 @@ function buildWordAnimatedLine(text, { index = 0, needsRomanization = false, isM
         addRomanizedText(div, prefetchedRomanized);
     }
 
+    if (
+        !isMusicNote
+        && div.dataset.isBlankLine !== 'true'
+        && prefetchedTranslation
+        && prefetchedTranslation.trim()
+        && prefetchedTranslation.trim() !== (text || '').toString().trim()
+    ) {
+        addLyricTranslation(div, prefetchedTranslation);
+    }
+
     return div;
 }
 
 function parseSyncedLyrics(syncedSource) {
     if (!syncedSource) return [];
-    const REMOVE_BLANK_GAP_SECONDS = 5;
-
-    const addGapFillNotes = (lines) => {
-        if (!Array.isArray(lines) || lines.length < 2) return lines || [];
-
-        const result = [lines[0]];
-        for (let i = 1; i < lines.length; i += 1) {
-            const currentLine = lines[i];
-            const prevLine = lines[i - 1];
-            const prevTime = Number(prevLine?.time);
-            const currentTime = Number(currentLine?.time);
-
-            if (Number.isFinite(prevTime) && Number.isFinite(currentTime)) {
-                const gapSeconds = currentTime - prevTime;
-                const prevWordCount = countLyricWords(prevLine?.text || '');
-                const dynamicThreshold = GAP_FILL_BASE_THRESHOLD_SECONDS + (prevWordCount * GAP_FILL_THRESHOLD_PER_WORD_SECONDS);
-                if (gapSeconds > dynamicThreshold) {
-                    const insertTime = prevTime + (gapSeconds / 2);
-                    if (insertTime < currentTime) {
-                        result.push({
-                            time: insertTime,
-                            text: MUSIC_NOTE_SYMBOL,
-                            isEmpty: true,
-                            isGapFill: true
-                        });
-                    }
-                }
-            }
-
-            result.push(currentLine);
-        }
-
-        return result;
-    };
-    const mergeConsecutiveBlankLines = (lines) => {
-        if (!Array.isArray(lines) || lines.length < 2) return lines || [];
-
-        const merged = [];
-        for (let i = 0; i < lines.length; i += 1) {
-            const line = lines[i];
-            const prev = merged[merged.length - 1];
-            const isLineBlank = !!line?.isEmpty;
-            const isPrevBlank = !!prev?.isEmpty;
-
-            if (isLineBlank && isPrevBlank) continue;
-            merged.push(line);
-        }
-
-        return merged;
-    };
-    const removeShortGapBlankLines = (lines) => {
-        if (!Array.isArray(lines) || lines.length < 3) return lines || [];
-
-        const out = [];
-        for (let i = 0; i < lines.length; i += 1) {
-            const line = lines[i];
-            const isBlank = !!line?.isEmpty || ((line?.text || '').toString().trim() === '');
-            if (!isBlank) {
-                out.push(line);
-                continue;
-            }
-
-            const prev = lines[i - 1];
-            const current = line;
-            const next = lines[i + 1];
-            const prevTime = Number(prev?.time);
-            const currentTime = Number(current?.time);
-            const nextTime = Number(next?.time);
-            const hasTimedNeighbors = Number.isFinite(prevTime) && Number.isFinite(nextTime) && Number.isFinite(currentTime);
-
-            if (hasTimedNeighbors) {
-                const prevToBlank = currentTime - prevTime;
-                const blankToNext = nextTime - currentTime;
-                // Remove timed blank only when it is tightly bounded on both sides.
-                if (prevToBlank < REMOVE_BLANK_GAP_SECONDS && blankToNext < REMOVE_BLANK_GAP_SECONDS) {
-                    continue;
-                }
-            }
-
-            out.push(line);
-        }
-
-        return out;
-    };
-    const addTrailingNote = (lines) => {
-        if (!Array.isArray(lines) || lines.length === 0) return lines || [];
-        const out = [...lines];
-        const last = out[out.length - 1];
-        const lastText = (last?.text || '').toString().trim();
-        const lastIsBlankOrNote = !!last?.isEmpty || lastText === '' || lastText === MUSIC_NOTE_SYMBOL;
-        if (lastIsBlankOrNote) return out;
-        const lastTime = Number(last?.time);
-        if (!Number.isFinite(lastTime)) return out;
-        out.push({
-            time: lastTime + 5,
-            text: MUSIC_NOTE_SYMBOL,
-            isEmpty: true,
-            isTrailingNote: true
-        });
-        return out;
-    };
-    const delayFinalBlankLineIfTooClose = (lines) => {
-        if (!Array.isArray(lines) || lines.length < 2) return lines || [];
-        const out = [...lines];
-        const lastIndex = out.length - 1;
-        const last = out[lastIndex];
-        const prev = out[lastIndex - 1];
-        const lastText = (last?.text || '').toString().trim();
-        const lastIsBlankOrNote = !!last?.isEmpty || lastText === '' || lastText === MUSIC_NOTE_SYMBOL;
-        if (!lastIsBlankOrNote || !!last?.isLeadingSynthetic) return out;
-
-        const prevTime = Number(prev?.time);
-        const lastTime = Number(last?.time);
-        if (!Number.isFinite(prevTime) || !Number.isFinite(lastTime)) return out;
-
-        const gap = lastTime - prevTime;
-        if (gap >= FINAL_BLANK_MIN_GAP_SECONDS) return out;
-
-        out[lastIndex] = {
-            ...last,
-            time: prevTime + FINAL_BLANK_TARGET_GAP_SECONDS
+    const normalizeParsedLines = (lines) => Array.isArray(lines) ? lines.filter(Boolean) : [];
+    const createLyricLine = ({
+        time,
+        rawTime = time,
+        text = '',
+        sourceIndex = null,
+        parsedIndex = null,
+        isInjectedBlank = false,
+        injectedKind = '',
+        isLeadingSynthetic = false
+    }) => {
+        const numericTime = Number(time);
+        const safeTime = Number.isFinite(numericTime) ? Math.max(0, numericTime) : 0;
+        const normalizedText = (text || '').toString();
+        const trimmedText = normalizedText.trim();
+        const isBlank = trimmedText === '';
+        return {
+            time: safeTime,
+            rawTime: Number.isFinite(Number(rawTime)) ? Number(rawTime) : safeTime,
+            text: normalizedText,
+            isEmpty: isBlank,
+            isSourceBlank: !isInjectedBlank && isBlank,
+            isInjectedBlank,
+            injectedKind,
+            isLeadingSynthetic,
+            sourceIndex: Number.isFinite(Number(sourceIndex)) ? Number(sourceIndex) : null,
+            parsedIndex: Number.isFinite(Number(parsedIndex)) ? Number(parsedIndex) : null
         };
-        return out;
     };
-    const addLeadingNoteIfMissing = (lines) => {
-        if (!Array.isArray(lines) || lines.length === 0) return lines || [];
-        const out = [...lines];
-        const first = out[0];
-        const firstText = (first?.text || '').toString().trim();
-        const firstIsBlankOrNote = !!first?.isEmpty || firstText === '' || firstText === MUSIC_NOTE_SYMBOL;
-        if (firstIsBlankOrNote) return out;
-        out.unshift({
-            time: 0,
-            text: MUSIC_NOTE_SYMBOL,
-            isEmpty: true,
-            isLeadingSynthetic: true
-        });
-        return out;
+    const isBlankLine = (line) => {
+        const text = (line?.text || '').toString().trim();
+        return !!line?.isInjectedBlank || !!line?.isEmpty || !!line?.isSourceBlank || text === '';
     };
-    const delayFirstActualLineIfAtZero = (lines) => {
-        if (!Array.isArray(lines) || lines.length < 2) return lines || [];
-        const out = [...lines];
-        let sawLeadingBlankOrNote = false;
+    const injectSyntheticBlankLines = (lines) => {
+        if (!Array.isArray(lines) || lines.length === 0) return [];
 
-        for (let i = 0; i < out.length; i += 1) {
-            const line = out[i];
-            if (line?.isLeadingSynthetic) {
-                sawLeadingBlankOrNote = true;
-                continue;
-            }
-
-            const text = (line?.text || '').toString().trim();
-            const isBlankOrNote = !!line?.isEmpty || text === '' || text === MUSIC_NOTE_SYMBOL;
-            if (isBlankOrNote) {
-                sawLeadingBlankOrNote = true;
-                continue;
-            }
-
-            const time = Number(line?.time);
-            if (sawLeadingBlankOrNote && Number.isFinite(time)) {
-                const rawTime = Number(line?.rawTime);
-                if (Number.isFinite(rawTime) && rawTime > 0) {
-                    out[i] = {
-                        ...line,
-                        time: Math.max(time, rawTime)
-                    };
-                } else if (time <= 0) {
-                    out[i] = {
-                        ...line,
-                        time: 0.5
-                    };
-                }
-            }
-            break;
+        const injected = [];
+        const firstLine = lines[0];
+        const firstLineTime = Number(firstLine?.time);
+        if (!isBlankLine(firstLine) && Number.isFinite(firstLineTime) && firstLineTime > 0) {
+            injected.push(createLyricLine({
+                time: 0,
+                text: '',
+                isInjectedBlank: true,
+                injectedKind: 'leading-gap',
+                isLeadingSynthetic: true
+            }));
         }
 
-        return out;
+        for (let i = 0; i < lines.length; i += 1) {
+            const currentLine = lines[i];
+            injected.push(currentLine);
+
+            if (i >= lines.length - 1) continue;
+
+            const nextLine = lines[i + 1];
+            const currentTime = Number(currentLine?.time);
+            const nextTime = Number(nextLine?.time);
+            if (!Number.isFinite(currentTime) || !Number.isFinite(nextTime)) continue;
+
+            const gapSeconds = nextTime - currentTime;
+            if (gapSeconds <= GAP_FILL_BASE_THRESHOLD_SECONDS) continue;
+            if (isBlankLine(currentLine) || isBlankLine(nextLine)) continue;
+
+            const blankTime = currentTime + FINAL_BLANK_TARGET_GAP_SECONDS;
+            if (!(blankTime < nextTime)) continue;
+
+            injected.push(createLyricLine({
+                time: blankTime,
+                text: '',
+                isInjectedBlank: true,
+                injectedKind: 'mid-gap'
+            }));
+        }
+
+        const lastLine = lines[lines.length - 1];
+        const lastLineTime = Number(lastLine?.time);
+        if (!isBlankLine(lastLine) && Number.isFinite(lastLineTime)) {
+            injected.push(createLyricLine({
+                time: lastLineTime + FINAL_BLANK_TARGET_GAP_SECONDS,
+                text: '',
+                isInjectedBlank: true,
+                injectedKind: 'trailing-gap'
+            }));
+        }
+
+        return injected;
     };
-    const normalizeParsedLines = (lines) => (
-        (() => {
-            const normalizedBase = delayFirstActualLineIfAtZero(
-                addLeadingNoteIfMissing(
-                    delayFinalBlankLineIfTooClose(
-                        addTrailingNote(
-                            mergeConsecutiveBlankLines(
-                                addGapFillNotes(
-                                    removeShortGapBlankLines(lines)
-                                )
-                            )
-                        )
-                    )
-                )
-            );
-            if (!Array.isArray(normalizedBase) || normalizedBase.length === 0) {
-                return normalizedBase;
-            }
-
-            let normalized = normalizedBase;
-            const leadingGhostLines = getLeadingGhostLinesCountForCurrentPage();
-            if (leadingGhostLines > 0) {
-                const firstTimeRaw = Number(normalized[0]?.time);
-                const firstTime = Number.isFinite(firstTimeRaw) ? firstTimeRaw : 0;
-                const ghosts = Array.from({ length: leadingGhostLines }, () => ({
-                    time: firstTime,
-                    text: '',
-                    isEmpty: false,
-                    isLeadingSynthetic: true,
-                    isGhostLeadingSynthetic: true
-                }));
-                normalized = [...ghosts, ...normalized];
-            }
-
-            return normalized;
-        })()
-    );
 
     // Array format: [{ time, text }]
     if (Array.isArray(syncedSource)) {
-        return normalizeParsedLines(syncedSource
+        return injectSyntheticBlankLines(normalizeParsedLines(syncedSource
             .map((item, sourceIndex) => {
-                const time = (typeof item?.time === 'number') ? item.time : 0;
+                const numericTime = Number(item?.time);
+                const time = Number.isFinite(numericTime) ? numericTime : 0;
                 const text = (item?.text || '').toString();
-                const trimmedText = text.trim();
-                const isIncomingBlank = !!item?.isEmpty || !!item?.isSourceBlank;
-                const isBlank = isIncomingBlank || trimmedText === '';
-                return {
+                const isIncomingBlank = !!item?.isEmpty || !!item?.isSourceBlank || text.trim() === '';
+                return createLyricLine({
                     time,
-                    text: trimmedText === '' ? MUSIC_NOTE_SYMBOL : text,
-                    isEmpty: isBlank,
-                    isSourceBlank: isBlank,
-                    sourceIndex
-                };
+                    rawTime: time,
+                    text: isIncomingBlank ? '' : text,
+                    sourceIndex,
+                    parsedIndex: sourceIndex
+                });
             })
-            .filter(Boolean));
+            .filter(Boolean)));
     }
 
     // LRC string format
     if (typeof syncedSource === 'string') {
-        return normalizeParsedLines(syncedSource
+        const parsedLines = normalizeParsedLines(syncedSource
             .split(/\r?\n/)
             .map((line, sourceIndex) => {
                 const match = line.match(/\[(\d+):(\d+)\.(\d+)\](.*)/);
@@ -997,25 +1298,29 @@ function parseSyncedLyrics(syncedSource) {
                 const ms = parseInt(match[3], 10);
                 const divisor = (match[3].length === 3 ? 1000 : 100);
                 const text = (match[4] || '').toString();
-                const trimmedText = text.trim();
                 const rawTime = (min * 60) + sec + (ms / divisor);
-                const time = rawTime - SYNCED_LYRIC_PARSE_OFFSET_SECONDS;
-                return {
-                    time,
+                return createLyricLine({
+                    // Keep provider timestamps intact. Subtracting a fixed parse-time
+                    // offset makes some sources, including YouTube Music-backed flows,
+                    // advance to the next lyric line too early for the entire song.
+                    time: rawTime,
                     rawTime,
-                    text: trimmedText === '' ? MUSIC_NOTE_SYMBOL : text,
-                    isEmpty: trimmedText === '',
-                    isSourceBlank: trimmedText === '',
+                    text,
                     sourceIndex
-                };
+                });
             })
-            .filter(Boolean));
+            .filter(Boolean))
+            .map((line, parsedIndex) => ({
+                ...line,
+                parsedIndex
+            }));
+        return injectSyntheticBlankLines(parsedLines);
     }
 
     return [];
 }
 
-function clampTrailingNoteToSongDuration(lines, songDuration) {
+function clampTrailingBlankToSongDuration(lines, songDuration) {
     if (!Array.isArray(lines) || lines.length === 0) return lines || [];
     const duration = Number(songDuration);
     if (!Number.isFinite(duration) || duration <= 0) return lines;
@@ -1023,13 +1328,13 @@ function clampTrailingNoteToSongDuration(lines, songDuration) {
     const out = [...lines];
     const lastIndex = out.length - 1;
     const last = out[lastIndex];
-    if (!last?.isTrailingNote) return out;
+    if (!last?.isInjectedBlank || last?.injectedKind !== 'trailing-gap') return out;
 
     const trailingTime = Number(last?.time);
     if (!Number.isFinite(trailingTime)) return out;
     if (trailingTime <= duration) return out;
 
-    // Keep the trailing note reachable before playback time clamps at duration.
+    // Keep the trailing blank reachable before playback time clamps at duration.
     const targetTime = Math.max(0, duration - 0.05);
     out[lastIndex] = { ...last, time: targetTime };
     return out;
@@ -1070,6 +1375,7 @@ export function displayLyricsUI(data, {
     const plainLyricsContainer = document.getElementById('plain-lyrics');
     const lyricsLoadingEl = document.getElementById('lyrics-loading');
     const rightNowPlaying = document.getElementById('song-info');
+    clearPendingLyricsContainerHide();
 
     const revealLyricsBlock = (activeContainer, inactiveContainer) => {
         if (inactiveContainer) {
@@ -1121,7 +1427,7 @@ export function displayLyricsUI(data, {
             // Wait for animation to complete
             setTimeout(() => {
                 resolve();
-            }, 300);
+            }, LYRICS_CONTAINER_EXIT_DURATION_MS);
         });
     };
 
@@ -1158,6 +1464,8 @@ animateOutLyrics().then(() => {
     lastRenderedLyricDisplayMode = null;
     lastStableLyricEffectiveTime = null;
     latchedBlankCutoffIndex = -1;
+    cancelPendingLeavingCurrentAnimation();
+    cancelPendingLyricModeReveal();
 
     if (!isFetchStillValid() || !isRenderStillCurrent()) return;
 
@@ -1172,7 +1480,6 @@ animateOutLyrics().then(() => {
             if (resetState && typeof state !== 'undefined') {
                 state.currentLyrics = [];
                 state.isSyncedLyrics = false;
-                state.lyricsOffset = 0;
             }
         } catch (_) {}
 
@@ -1182,6 +1489,7 @@ animateOutLyrics().then(() => {
         }
         const syncedSource = data?.syncLyrics || data?.syncedLyrics || data?.synced;
         const romanizedSyncedSource = data?.romanizedSyncedLyrics || data?.romanizedSyncLyrics || null;
+        const translatedSyncedSource = data?.translatedSyncedLyrics || data?.englishSyncedLyrics || null;
         const plainText = getPlainTextFromLyricsPayload(data);
         const romanizedPlainText = (typeof data?.romanizedPlainLyrics === 'string') ? data.romanizedPlainLyrics : '';
 
@@ -1189,58 +1497,91 @@ animateOutLyrics().then(() => {
             state.isSyncedLyrics = true;
             state.currentLyrics = parseSyncedLyrics(syncedSource);
             const knownDuration = Number(state.currentSongData?.songDuration ?? data?.songDuration ?? 0);
-            state.currentLyrics = clampTrailingNoteToSongDuration(state.currentLyrics, knownDuration);
+            state.currentLyrics = clampTrailingBlankToSongDuration(state.currentLyrics, knownDuration);
 
             if (state.currentLyrics.length > 0) {
                 if (!isFetchStillValid() || !isRenderStillCurrent()) return;
-                const romanizedBySourceIndex = (() => {
-                    if (!Array.isArray(romanizedSyncedSource)) return null;
-                    const map = new Map();
-                    romanizedSyncedSource.forEach((item, idx) => {
+                const buildAssistIndexMaps = (sourceItems) => {
+                    if (!Array.isArray(sourceItems)) return null;
+                    const bySourceIndex = new Map();
+                    const byParsedIndex = new Map();
+                    sourceItems.forEach((item, idx) => {
+                        const text = (item?.text || '').toString();
                         const rawSourceIndex = Number(item?.sourceIndex);
-                        const key = Number.isFinite(rawSourceIndex) && rawSourceIndex >= 0 ? rawSourceIndex : idx;
-                        if (!map.has(key)) {
-                            map.set(key, (item?.text || '').toString());
+                        const rawParsedIndex = Number(item?.parsedIndex);
+                        if (Number.isFinite(rawSourceIndex) && rawSourceIndex >= 0 && !bySourceIndex.has(rawSourceIndex)) {
+                            bySourceIndex.set(rawSourceIndex, text);
+                        }
+                        const parsedKey = Number.isFinite(rawParsedIndex) && rawParsedIndex >= 0 ? rawParsedIndex : idx;
+                        if (!byParsedIndex.has(parsedKey)) {
+                            byParsedIndex.set(parsedKey, text);
                         }
                     });
-                    return map;
-                })();
+                    return { bySourceIndex, byParsedIndex };
+                };
+                const romanizedAssistMaps = buildAssistIndexMaps(romanizedSyncedSource);
+                const translatedAssistMaps = buildAssistIndexMaps(translatedSyncedSource);
+                const resolveAssistText = (maps, line) => {
+                    if (!maps || line?.isInjectedBlank) return '';
+                    const sourceIndex = Number(line?.sourceIndex);
+                    if (Number.isFinite(sourceIndex) && sourceIndex >= 0 && maps.bySourceIndex.has(sourceIndex)) {
+                        return (maps.bySourceIndex.get(sourceIndex) || '').toString();
+                    }
+                    const parsedIndex = Number(line?.parsedIndex);
+                    if (Number.isFinite(parsedIndex) && parsedIndex >= 0) {
+                        return (maps.byParsedIndex.get(parsedIndex) || '').toString();
+                    }
+                    return '';
+                };
 
                 state.currentLyrics.forEach((line, index) => {
-                    const text = line?.isGhostLeadingSynthetic
-                        ? ''
-                        : (line?.text || MUSIC_NOTE_SYMBOL).toString();
-                    let prefetchedRomanized = '';
-                    if (romanizedBySourceIndex) {
-                        const sourceIndex = Number(line?.sourceIndex);
-                        if (Number.isFinite(sourceIndex) && sourceIndex >= 0) {
-                            prefetchedRomanized = (romanizedBySourceIndex.get(sourceIndex) || '').toString();
-                        } else {
-                            prefetchedRomanized = (romanizedBySourceIndex.get(index) || '').toString();
-                        }
-                    }
+                    const isBlankLine = !!line?.isEmpty || !!line?.isSourceBlank || !!line?.isInjectedBlank;
+                    const text = isBlankLine
+                        ? MUSIC_NOTE_SYMBOL
+                        : (line?.text ?? '').toString();
+                    const prefetchedRomanized = resolveAssistText(romanizedAssistMaps, line);
+                    const prefetchedTranslation = resolveAssistText(translatedAssistMaps, line);
                     const div = buildWordAnimatedLine(text, {
                         index,
-                        needsRomanization: isNonLatin(text),
-                        isMusicNote: !line?.isGhostLeadingSynthetic
-                            && ((text.trim() === MUSIC_NOTE_SYMBOL) || !!line?.isEmpty),
-                        prefetchedRomanized
+                        needsRomanization: !isBlankLine && !line?.isInjectedBlank && isNonLatin(text),
+                        isMusicNote: isBlankLine,
+                        prefetchedRomanized,
+                        prefetchedTranslation
                     });
-                    if (line?.isGhostLeadingSynthetic) {
-                        div.classList.add('leading-ghost-line');
-                    }
                     applyLineTimingStyles(div, index);
                     if (syncedLyricsContainer) syncedLyricsContainer.appendChild(div);
                 });
                 refreshLyricLineElements();
 
                 if (lyricsContainer) lyricsContainer.classList.remove('plain-mode');
-                const finalizeLyricsReveal = () => {
+                const finalizeLyricsReveal = async () => {
                     if (!isFetchStillValid() || !isRenderStillCurrent()) return;
 
-                    const currentTime = (state.currentSongData && typeof state.currentSongData.elapsedSeconds === 'number')
+                    const localCurrentTime = (state.currentSongData && typeof state.currentSongData.elapsedSeconds === 'number')
                         ? state.currentSongData.elapsedSeconds
                         : 0;
+                    const fetchedCurrentTime = await fetchFreshSongElapsedForRender(
+                        state.currentVideoId,
+                        localCurrentTime
+                    );
+                    if (!isFetchStillValid() || !isRenderStillCurrent()) return;
+                    const currentTime = (() => {
+                        const localTime = Number(localCurrentTime);
+                        const fetchedTime = Number(fetchedCurrentTime);
+                        const safeLocalTime = Number.isFinite(localTime) ? Math.max(0, localTime) : 0;
+                        const safeFetchedTime = Number.isFinite(fetchedTime) ? Math.max(0, fetchedTime) : safeLocalTime;
+
+                        // On song changes, the local client state can briefly keep a
+                        // stale advanced elapsed value while /song has already been
+                        // corrected by newer server data. Preserve the "use the more
+                        // advanced local time" behavior only for small tick-sized
+                        // differences; otherwise prefer the fresher server value.
+                        if (safeLocalTime > (safeFetchedTime + 2)) {
+                            return safeFetchedTime;
+                        }
+
+                        return Math.max(safeLocalTime, safeFetchedTime);
+                    })();
 
                     if (isFetchStillValid() && isRenderStillCurrent()) {
                         if (lyricsLoadingEl) lyricsLoadingEl.classList.remove('active');
@@ -1263,6 +1604,11 @@ animateOutLyrics().then(() => {
                         }
                     }
 
+                    // When lyrics finish mounting mid-song, keep the most advanced
+                    // elapsed time we already know locally. A fresh /song response
+                    // can legitimately lag behind the websocket/local progress path
+                    // by a tick, and forcing that older value on first paint is what
+                    // makes the initial line appear late until the next playback event.
                     updateLyricsDisplay(currentTime);
 
                     if (setLastFetched) {
@@ -1273,14 +1619,7 @@ animateOutLyrics().then(() => {
                     console.log(`[${logTag}] Lyrics loaded and displayed (synced)`);
                 };
 
-                const revealDelayMs = Number(window.__lyricsSongInfoRevealPendingUntil || 0) > 0
-                    ? Math.max(0, Number(window.__lyricsSongInfoRevealPendingUntil || 0) - Date.now())
-                    : 0;
-                if (revealDelayMs > 0) {
-                    setTimeout(finalizeLyricsReveal, revealDelayMs);
-                } else {
-                    finalizeLyricsReveal();
-                }
+                void finalizeLyricsReveal();
                 return;
             }
 
@@ -1337,13 +1676,14 @@ export function hideLyricsUI({
     lastRenderedLyricDisplayMode = null;
     lastStableLyricEffectiveTime = null;
     latchedBlankCutoffIndex = -1;
+    cancelPendingLeavingCurrentAnimation();
+    cancelPendingLyricModeReveal();
 
     try {
         state.currentLyrics = [];
         state.isSyncedLyrics = false;
         state.currentFetchVideoId = null;
         state.lastFetchedVideoId = null;
-        state.lyricsOffset = 0;
         if (clearVideoId) state.currentVideoId = null;
     } catch (_) {
         // ignore
@@ -1353,37 +1693,63 @@ export function hideLyricsUI({
     const syncedLyricsContainer = document.getElementById('synced-lyrics');
     const plainLyricsContainer = document.getElementById('plain-lyrics');
     const lyricsLoadingEl = document.getElementById('lyrics-loading');
+    const hadVisibleLyrics =
+        !!lyricsContainer?.classList.contains('visible')
+        || !!lyricsContainer?.classList.contains('has-lyrics')
+        || !!syncedLyricsContainer?.children.length
+        || !!plainLyricsContainer?.children.length;
 
-    if (syncedLyricsContainer) syncedLyricsContainer.innerHTML = '';
-    clearLyricLineElementsCache();
-    if (plainLyricsContainer) {
-        plainLyricsContainer.innerHTML = '';
-        plainLyricsContainer.style.display = 'none';
-        plainLyricsContainer.classList.remove('revealed');
-        plainLyricsContainer.classList.remove('active');
-    }
+    clearPendingLyricsContainerHide();
 
-    if (syncedLyricsContainer) {
-        syncedLyricsContainer.classList.remove('revealed');
-        syncedLyricsContainer.classList.add('transitioning');
-    }
-    if (lyricsContainer) {
-        lyricsContainer.classList.add('no-lyrics');
-        lyricsContainer.classList.remove('visible');
-        lyricsContainer.classList.remove('has-lyrics');
-        lyricsContainer.classList.remove('loading-lyrics');
-    }
-    if (lyricsLoadingEl) {
-        lyricsLoadingEl.classList.remove('active');
-        lyricsLoadingEl.style.display = '';
-    }
-    if (lyricsContainer && !state.lyricsManuallyCollapsed && !lyricsContainer.classList.contains('collapsed')) {
-        toggleLyricsCollapse({ auto: true, force: 'collapse' });
+    if (hadVisibleLyrics) {
+        if (lyricsContainer) lyricsContainer.classList.add('song-changing');
+        if (syncedLyricsContainer) syncedLyricsContainer.classList.add('song-changing');
+        if (plainLyricsContainer) plainLyricsContainer.classList.add('song-changing');
+        const allLines = document.querySelectorAll('#synced-lyrics .lyric-line, #plain-lyrics .lyric-line');
+        allLines.forEach((line) => line.classList.add('transitioning-out'));
     }
 
-    const songInfo = document.getElementById('song-info');
-    if (songInfo) songInfo.classList.add('no-lyrics');
-    setCompactNoLyricsState(true);
+    const finalizeHide = () => {
+        if (syncedLyricsContainer) syncedLyricsContainer.innerHTML = '';
+        clearLyricLineElementsCache();
+        if (plainLyricsContainer) {
+            plainLyricsContainer.innerHTML = '';
+            plainLyricsContainer.style.display = 'none';
+            plainLyricsContainer.classList.remove('revealed');
+            plainLyricsContainer.classList.remove('active', 'song-changing');
+        }
+
+        if (syncedLyricsContainer) {
+            syncedLyricsContainer.classList.remove('revealed');
+            syncedLyricsContainer.classList.remove('song-changing');
+            syncedLyricsContainer.classList.add('transitioning');
+        }
+        if (lyricsContainer) {
+            lyricsContainer.classList.add('no-lyrics');
+            lyricsContainer.classList.remove('visible');
+            lyricsContainer.classList.remove('has-lyrics');
+            lyricsContainer.classList.remove('loading-lyrics');
+            lyricsContainer.classList.remove('song-changing');
+        }
+        if (lyricsLoadingEl) {
+            lyricsLoadingEl.classList.remove('active');
+            lyricsLoadingEl.style.display = '';
+        }
+        if (lyricsContainer && !state.lyricsManuallyCollapsed && !lyricsContainer.classList.contains('collapsed')) {
+            toggleLyricsCollapse({ auto: true, force: 'collapse' });
+        }
+
+        const songInfo = document.getElementById('song-info');
+        if (songInfo) songInfo.classList.add('no-lyrics');
+        setCompactNoLyricsState(true);
+        lyricsContainerHideTimer = null;
+    };
+
+    if (hadVisibleLyrics) {
+        lyricsContainerHideTimer = setTimeout(finalizeHide, LYRICS_CONTAINER_EXIT_DURATION_MS);
+    } else {
+        finalizeHide();
+    }
 
     console.log(`[${logTag}] Lyrics hidden`);
 }

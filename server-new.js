@@ -2,16 +2,19 @@ const { Hono } = require('hono');
 const { cors } = require('hono/cors');
 const http = require('http');
 const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
 const fs = require('fs');
 const fsp = fs.promises;
-const axios = require('axios');
 const WebSocket = require('ws');
 const { WritableStream } = require('stream/web');
+const { spawn } = require('child_process');
 
 const { logEvent } = require('./lib/logger');
 const {
     loadLyricsCacheFromDisk,
-    fetchLyrics
+    fetchLyrics,
+    fetchLyricsCandidate
 } = require('./lib/lyrics');
 const { fetchImage } = require('./lib/image-proxy');
 
@@ -21,9 +24,6 @@ const PUBLIC_DIR = process.env.PUBLIC_DIR
     ? path.resolve(process.env.PUBLIC_DIR)
     : (process.pkg ? path.join(__dirname, 'public') : path.resolve('public'));
 const SAMPLE_DIR = path.join(PUBLIC_DIR, 'welcome', 'sample');
-const YT_MUSIC_API_URLS = process.env.YT_MUSIC_API_URL
-    ? [process.env.YT_MUSIC_API_URL]
-    : ['http://127.0.0.1:26538/api/v1'];
 
 const MIME_TYPES = {
     '.html': 'text/html',
@@ -45,25 +45,6 @@ app.use('*', cors());
 
 const clients = new Set();
 let latestSongData = null;
-let activeApiUrlIndex = 0;
-let lastSongSnapshot = null;
-let lastProgressSecond = null;
-let lastPlaybackPaused = null;
-
-let ytMusicWs = null;
-let ytMusicWsReconnectTimeout = null;
-let ytMusicWsReconnectAttempts = 0;
-let songPollInterval = null;
-let songPollInFlight = false;
-let lastPollSucceeded = false;
-
-const API_REQUEST_TIMEOUT_MS = 5000;
-const API_MIN_CALL_INTERVAL_MS = 100;
-const SONG_POLL_INTERVAL_MS = 1000;
-const WS_RECONNECT_BASE_DELAY_MS = 3000;
-const WS_RECONNECT_MAX_DELAY_MS = 30000;
-
-let lastApiCallTime = 0;
 
 async function readJsonFileSafe(filePath) {
     try {
@@ -161,374 +142,12 @@ function materializeSongDataForDispatch(songData, nowMs = Date.now()) {
     };
 }
 
-function getActiveApiUrl() {
-    return YT_MUSIC_API_URLS[activeApiUrlIndex];
-}
-
-function getWebSocketUrl(apiUrl = getActiveApiUrl()) {
-    try {
-        const url = new URL(apiUrl);
-        const protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-        const basePath = url.pathname.replace(/\/+$/, '');
-        const wsPath = basePath.endsWith('/ws') ? basePath : `${basePath}/ws`;
-        return `${protocol}//${url.host}${wsPath}`;
-    } catch (_) {
-        const normalized = String(apiUrl || '').replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
-        return normalized.endsWith('/ws') ? normalized : `${normalized.replace(/\/+$/, '')}/ws`;
-    }
-}
-
-async function waitForApiRateLimitWindow() {
-    const now = Date.now();
-    const delta = now - lastApiCallTime;
-    if (delta < API_MIN_CALL_INTERVAL_MS) {
-        await new Promise((resolve) => setTimeout(resolve, API_MIN_CALL_INTERVAL_MS - delta));
-    }
-}
-
-async function proxyApiRequest(method, endpoint, data = null, params = null) {
-    await waitForApiRateLimitWindow();
-
-    const startIndex = activeApiUrlIndex;
-    for (let attempt = 0; attempt < YT_MUSIC_API_URLS.length; attempt += 1) {
-        const apiUrlIndex = (startIndex + attempt) % YT_MUSIC_API_URLS.length;
-        const apiUrl = YT_MUSIC_API_URLS[apiUrlIndex];
-
-        try {
-            lastApiCallTime = Date.now();
-            const response = await axios({
-                method,
-                url: `${apiUrl}${endpoint}`,
-                data: data || undefined,
-                params: params || undefined,
-                timeout: API_REQUEST_TIMEOUT_MS,
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            });
-
-            if (apiUrlIndex !== activeApiUrlIndex) {
-                logEvent('warn', 'YTM', `Switched API endpoint to ${apiUrl}`);
-                activeApiUrlIndex = apiUrlIndex;
-                reconnectYouTubeMusicWebSocket();
-            }
-
-            return {
-                success: true,
-                data: response.data,
-                status: response.status
-            };
-        } catch (error) {
-            const isConnectionError =
-                error.code === 'ECONNREFUSED' ||
-                error.code === 'ETIMEDOUT' ||
-                error.code === 'ENOTFOUND' ||
-                error.code === 'ECONNRESET' ||
-                String(error.message || '').toLowerCase().includes('timeout');
-
-            if (isConnectionError && attempt < YT_MUSIC_API_URLS.length - 1) {
-                continue;
-            }
-
-            return {
-                success: false,
-                error: error.message,
-                status: error.response?.status || 500,
-                data: error.response?.data || null
-            };
-        }
-    }
-
-    return {
-        success: false,
-        error: 'All YouTube Music API endpoints failed',
-        status: 503,
-        data: null
-    };
-}
-
-function normalizeSongData(input) {
-    if (!input || typeof input !== 'object') return null;
-
-    const videoId = input.videoId || input.id || null;
-    if (!videoId) return null;
-
-    const elapsedSeconds = Number(input.elapsedSeconds ?? input.progress ?? 0);
-    const songDuration = Number(input.songDuration ?? input.duration ?? 0);
-    const sampledAtMs = Number(input.sampledAtMs ?? input.serverReceivedAtMs ?? Date.now());
-
-    const imageCandidates = [
-        input.imageSrc,
-        input.thumbnail,
-        input.thumbnailUrl,
-        input.albumArt,
-        input.coverArt,
-        input.artwork
-    ];
-
-    let imageSrc = '';
-    for (const candidate of imageCandidates) {
-        if (typeof candidate === 'string' && candidate.trim()) {
-            imageSrc = candidate.trim();
-            break;
-        }
-    }
-
-    return {
-        ...input,
-        videoId,
-        title: input.title || input.name || '',
-        artist: input.artist || input.author || input.artistName || '',
-        album: input.album || '',
-        imageSrc,
-        elapsedSeconds: Number.isFinite(elapsedSeconds) ? elapsedSeconds : 0,
-        songDuration: Number.isFinite(songDuration) ? songDuration : 0,
-        isPaused: !!(input.isPaused ?? input.paused ?? false),
-        albumArtist: input.albumArtist || '',
-        trackNumber: Number(input.trackNumber ?? 0) || 0,
-        albumTrackCount: Number(input.albumTrackCount ?? 0) || 0,
-        genres: Array.isArray(input.genres) ? input.genres : [],
-        playbackType: input.playbackType || input.mediaType || '',
-        sampledAtMs: Number.isFinite(sampledAtMs) ? sampledAtMs : Date.now()
-    };
-}
-
-function maybeBroadcastSongUpdate(songData) {
-    latestSongData = songData;
-
-    const comparable = {
-        videoId: songData.videoId,
-        title: songData.title || '',
-        artist: songData.artist || '',
-        album: songData.album || '',
-        imageSrc: songData.imageSrc || '',
-        isPaused: !!songData.isPaused
-    };
-
-    const snapshotChanged = JSON.stringify(comparable) !== JSON.stringify(lastSongSnapshot);
-    if (snapshotChanged) {
-        lastSongSnapshot = comparable;
-        broadcast({ type: 'song_updated', data: songData });
-    }
-
-    const progressSecond = Math.floor(Number(songData.elapsedSeconds || 0));
-    if (Number.isFinite(progressSecond) && progressSecond !== lastProgressSecond) {
-        lastProgressSecond = progressSecond;
-        broadcast({
-            type: 'song_progress',
-            data: {
-                elapsedSeconds: songData.elapsedSeconds,
-                songDuration: songData.songDuration,
-                videoId: songData.videoId,
-                isPaused: !!songData.isPaused,
-                sampledAtMs: songData.sampledAtMs
-            }
-        });
-    }
-
-    const paused = !!songData.isPaused;
-    if (paused !== lastPlaybackPaused) {
-        lastPlaybackPaused = paused;
-        broadcast({ type: 'playback_updated', data: songData });
-    }
-}
-
-function markNoActiveSong() {
-    if (!latestSongData) return;
-
-    latestSongData = {
-        ...latestSongData,
-        isPaused: true,
-        sampledAtMs: Date.now()
-    };
-    lastPlaybackPaused = true;
-    broadcast({ type: 'playback_updated', data: latestSongData });
-}
-
-function consumePotentialSongPayload(payload) {
-    const songData = normalizeSongData({
-        ...payload,
-        serverReceivedAtMs: Date.now()
-    });
-
-    if (!songData) return false;
-    maybeBroadcastSongUpdate(songData);
-    return true;
-}
-
-async function fetchCurrentSongFromApi() {
-    const result = await proxyApiRequest('GET', '/song');
-    if (!result.success) {
-        if (result.status === 404) {
-            lastPollSucceeded = true;
-            markNoActiveSong();
-            return null;
-        }
-
-        if (lastPollSucceeded) {
-            logEvent('warn', 'YTM', `Song poll failed: ${result.error}`);
-        }
-        lastPollSucceeded = false;
-        return null;
-    }
-
-    lastPollSucceeded = true;
-    if (!consumePotentialSongPayload(result.data)) {
-        if (result.status === 204 || result.data?.hasSession === false) {
-            markNoActiveSong();
-        }
-        return null;
-    }
-
-    return latestSongData;
-}
-
-async function pollCurrentSong() {
-    if (songPollInFlight) return;
-    songPollInFlight = true;
-    try {
-        await fetchCurrentSongFromApi();
-    } finally {
-        songPollInFlight = false;
-    }
-}
-
-function scheduleYouTubeMusicWsReconnect() {
-    if (ytMusicWsReconnectTimeout) {
-        clearTimeout(ytMusicWsReconnectTimeout);
-    }
-
-    const delay = Math.min(
-        WS_RECONNECT_BASE_DELAY_MS * Math.pow(2, ytMusicWsReconnectAttempts),
-        WS_RECONNECT_MAX_DELAY_MS
-    );
-    ytMusicWsReconnectAttempts += 1;
-
-    ytMusicWsReconnectTimeout = setTimeout(() => {
-        connectToYouTubeMusicWebSocket();
-    }, delay);
-}
-
-async function handleYouTubeMusicWsMessage(message) {
-    if (!message || typeof message !== 'object') return;
-
-    if (message.type === 'song_updated' || message.type === 'song' || message.type === 'track_changed') {
-        consumePotentialSongPayload(message.data || message.song || message.track || message);
-        return;
-    }
-
-    if (message.type === 'playback_updated' || message.type === 'playback' || message.type === 'playback_state') {
-        consumePotentialSongPayload(message.data || message.song || message.track || message);
-        return;
-    }
-
-    if (message.type === 'song_progress' || message.type === 'progress') {
-        if (!latestSongData) return;
-        const elapsedSeconds = Number(message.data?.elapsedSeconds ?? message.elapsedSeconds ?? message.progress);
-        const songDuration = Number(message.data?.songDuration ?? message.songDuration ?? message.duration);
-        const isPaused = message.data?.isPaused ?? message.isPaused ?? latestSongData.isPaused;
-
-        if (!Number.isFinite(elapsedSeconds)) return;
-
-        maybeBroadcastSongUpdate({
-            ...latestSongData,
-            elapsedSeconds,
-            songDuration: Number.isFinite(songDuration) ? songDuration : latestSongData.songDuration,
-            isPaused: !!isPaused,
-            sampledAtMs: Date.now()
-        });
-        return;
-    }
-
-    if (message.song || message.track || message.videoId || message.id) {
-        consumePotentialSongPayload(message.song || message.track || message);
-        return;
-    }
-
-    if (message.hasSession === false) {
-        markNoActiveSong();
-    }
-}
-
-function connectToYouTubeMusicWebSocket() {
-    if (ytMusicWs && (ytMusicWs.readyState === WebSocket.CONNECTING || ytMusicWs.readyState === WebSocket.OPEN)) {
-        return;
-    }
-
-    const wsUrl = getWebSocketUrl();
-    try {
-        ytMusicWs = new WebSocket(wsUrl);
-
-        ytMusicWs.on('open', () => {
-            ytMusicWsReconnectAttempts = 0;
-            logEvent('success', 'YTM', `Connected to WebSocket ${wsUrl}`);
-        });
-
-        ytMusicWs.on('message', async (raw) => {
-            try {
-                const message = JSON.parse(raw.toString());
-                await handleYouTubeMusicWsMessage(message);
-            } catch (error) {
-                logEvent('error', 'YTM', `Invalid WebSocket payload: ${error.message}`);
-            }
-        });
-
-        ytMusicWs.on('close', () => {
-            ytMusicWs = null;
-            logEvent('warn', 'YTM', 'WebSocket disconnected');
-            scheduleYouTubeMusicWsReconnect();
-        });
-
-        ytMusicWs.on('error', (error) => {
-            logEvent('error', 'YTM', `WebSocket error: ${error.message}`);
-        });
-    } catch (error) {
-        ytMusicWs = null;
-        logEvent('error', 'YTM', `Failed to connect WebSocket: ${error.message}`);
-        scheduleYouTubeMusicWsReconnect();
-    }
-}
-
-function reconnectYouTubeMusicWebSocket() {
-    if (ytMusicWsReconnectTimeout) {
-        clearTimeout(ytMusicWsReconnectTimeout);
-        ytMusicWsReconnectTimeout = null;
-    }
-
-    ytMusicWsReconnectAttempts = 0;
-
-    if (ytMusicWs) {
-        ytMusicWs.removeAllListeners();
-        try {
-            ytMusicWs.close();
-        } catch (_) {}
-        ytMusicWs = null;
-    }
-
-    connectToYouTubeMusicWebSocket();
-}
-
-function startSongPolling() {
-    if (songPollInterval) return;
-    songPollInterval = setInterval(() => {
-        pollCurrentSong().catch((error) => {
-            logEvent('error', 'YTM', `Polling error: ${error.message}`);
-        });
-    }, SONG_POLL_INTERVAL_MS);
-}
-
 app.get('/api/v1/song', async (c) => {
     try {
         if (latestSongData) {
             return c.json(materializeSongDataForDispatch(latestSongData));
         }
-
-        const songData = await fetchCurrentSongFromApi();
-        if (songData) {
-            return c.json(materializeSongDataForDispatch(songData));
-        }
-
-        return c.json({ error: 'No active YouTube Music session' }, 404);
+        return c.json({ error: 'No active media session' }, 404);
     } catch (error) {
         return c.json({ error: error.message }, 500);
     }
@@ -541,12 +160,18 @@ app.get('/api/v1/lyrics', async (c) => {
         const title = c.req.query('title');
         const album = c.req.query('album') || '';
         const duration = parseFloat(c.req.query('duration') || '0');
+        const translationExcludedLanguages = String(c.req.query('translationExclude') || '')
+            .split(/[,\s]+/g)
+            .map((value) => value.trim().toLowerCase())
+            .filter(Boolean);
 
         if (!videoId || !artist || !title) {
             return c.json({ error: 'Missing required parameters: videoId, artist, title' }, 400);
         }
 
-        const result = await fetchLyrics(videoId, artist, title, album, duration, broadcast);
+        const result = await fetchLyrics(videoId, artist, title, album, duration, broadcast, {
+            excludedLanguages: translationExcludedLanguages
+        });
         if (result.success) {
             return c.json(result);
         }
@@ -554,6 +179,42 @@ app.get('/api/v1/lyrics', async (c) => {
         return c.json({ success: false, error: result.error || 'No lyrics found' }, 404);
     } catch (error) {
         console.error('[LYRICS] Error fetching lyrics:', error);
+        return c.json({ error: error.message }, 500);
+    }
+});
+
+app.get('/api/v1/lyrics/candidate', async (c) => {
+    try {
+        const videoId = c.req.query('videoId');
+        const artist = c.req.query('artist');
+        const title = c.req.query('title');
+        const album = c.req.query('album') || '';
+        const duration = parseFloat(c.req.query('duration') || '0');
+        const offset = parseInt(c.req.query('offset') || '0', 10);
+        const translationExcludedLanguages = String(c.req.query('translationExclude') || '')
+            .split(/[,\s]+/g)
+            .map((value) => value.trim().toLowerCase())
+            .filter(Boolean);
+
+        if (!videoId || !artist || !title) {
+            return c.json({ error: 'Missing required parameters: videoId, artist, title' }, 400);
+        }
+
+        const result = await fetchLyricsCandidate(videoId, artist, title, album, duration, offset, broadcast, {
+            excludedLanguages: translationExcludedLanguages
+        });
+        if (result.success) {
+            return c.json(result);
+        }
+
+        return c.json({
+            success: false,
+            error: result.error || 'No alternate lyrics found',
+            candidateOffset: result.candidateOffset ?? offset,
+            totalCandidates: result.totalCandidates ?? 0
+        }, 404);
+    } catch (error) {
+        console.error('[LYRICS] Error fetching alternate lyrics candidate:', error);
         return c.json({ error: error.message }, 500);
     }
 });
@@ -759,16 +420,270 @@ wss.on('connection', (ws, req) => {
     });
 });
 
+let lastSongSnapshot = null;
+let lastProgressSecond = null;
+let lastPlaybackPaused = null;
+
+function normalizeSongData(input) {
+    if (!input || typeof input !== 'object') return null;
+    const videoId = input.videoId || input.id || null;
+    if (!videoId) return null;
+    return {
+        ...input,
+        videoId,
+        elapsedSeconds: Number(input.elapsedSeconds ?? input.progress ?? 0) || 0,
+        songDuration: Number(input.songDuration ?? input.duration ?? 0) || 0,
+        isPaused: input.isPaused ?? false,
+        imageSrc: input.imageSrc || '',
+        albumArtist: input.albumArtist || '',
+        trackNumber: Number(input.trackNumber ?? 0) || 0,
+        albumTrackCount: Number(input.albumTrackCount ?? 0) || 0,
+        genres: Array.isArray(input.genres) ? input.genres : [],
+        playbackType: input.playbackType || '',
+        sampledAtMs: Number(input.sampledAtMs ?? input.serverReceivedAtMs ?? Date.now()) || Date.now()
+    };
+}
+
+function maybeBroadcastSongUpdate(songData) {
+    latestSongData = songData;
+    const comparable = {
+        videoId: songData.videoId,
+        title: songData.title || '',
+        artist: songData.artist || '',
+        album: songData.album || '',
+        imageSrc: songData.imageSrc || '',
+        isPaused: !!songData.isPaused
+    };
+
+    const snapshotChanged = JSON.stringify(comparable) !== JSON.stringify(lastSongSnapshot);
+    if (snapshotChanged) {
+        lastSongSnapshot = comparable;
+        broadcast({ type: 'song_updated', data: songData });
+    }
+
+    const progressSecond = Math.floor(Number(songData.elapsedSeconds || 0));
+    if (Number.isFinite(progressSecond) && progressSecond !== lastProgressSecond) {
+        lastProgressSecond = progressSecond;
+        broadcast({
+            type: 'song_progress',
+            data: {
+                elapsedSeconds: songData.elapsedSeconds,
+                songDuration: songData.songDuration,
+                videoId: songData.videoId,
+                isPaused: !!songData.isPaused,
+                sampledAtMs: songData.sampledAtMs
+            }
+        });
+    }
+
+    const paused = !!songData.isPaused;
+    if (paused !== lastPlaybackPaused) {
+        lastPlaybackPaused = paused;
+        broadcast({ type: 'playback_updated', data: songData });
+    }
+}
+
+let smtcProcess = null;
+let smtcReconnectTimeout = null;
+let smtcReconnectAttempts = 0;
+let smtcStdoutBuffer = '';
+const BRIDGE_RECONNECT_BASE_DELAY_MS = 3000;
+const BRIDGE_RECONNECT_MAX_DELAY_MS = 30000;
+let resolvedSmtcHelperPath = null;
+let attemptedHelperAutoBuild = false;
+
+function getSmtcHelperCandidates() {
+    const archStagingPath = path.resolve(__dirname, 'smtc-helper', `${process.arch}-staging`, 'lyrics-smtc-bridge.exe');
+    const archSpecificPath = path.resolve(__dirname, 'smtc-helper', process.arch, 'lyrics-smtc-bridge.exe');
+    const canonicalPath = path.resolve(__dirname, 'smtc-helper', 'lyrics-smtc-bridge.exe');
+
+    if (process.pkg) {
+        return [canonicalPath, archSpecificPath];
+    }
+
+    return [archStagingPath, archSpecificPath, canonicalPath];
+}
+
+function readEmbeddedHelperBytes(helperPath) {
+    try {
+        return fs.readFileSync(helperPath);
+    } catch (_) {
+        return null;
+    }
+}
+
+function buildLocalSmtcHelperIfMissing(helperPath) {
+    if (attemptedHelperAutoBuild) return;
+    attemptedHelperAutoBuild = true;
+    const targetArch = process.arch === 'arm64' ? 'arm64' : 'x64';
+    logEvent('error', 'SMTC', `Helper exe not found. Please place lyrics-smtc-bridge.exe at: ${helperPath}`);
+    logEvent('info', 'SMTC', `Build it on a machine with .NET 8 SDK: dotnet publish SmtcBridge.csproj -c Release -r win-${targetArch} --self-contained`);
+}
+
+function resolveSmtcHelperPath() {
+    if (resolvedSmtcHelperPath) return resolvedSmtcHelperPath;
+    if (process.env.SMTC_HELPER_PATH) {
+        resolvedSmtcHelperPath = process.env.SMTC_HELPER_PATH;
+        return resolvedSmtcHelperPath;
+    }
+
+    const helperCandidates = getSmtcHelperCandidates();
+
+    if (!process.pkg) {
+        for (const candidate of helperCandidates) {
+            if (fs.existsSync(candidate)) {
+                resolvedSmtcHelperPath = candidate;
+                return resolvedSmtcHelperPath;
+            }
+        }
+        resolvedSmtcHelperPath = helperCandidates[0];
+        return resolvedSmtcHelperPath;
+    }
+
+    try {
+        let embeddedPath = null;
+        let helperBytes = null;
+
+        for (const candidate of helperCandidates) {
+            const bytes = readEmbeddedHelperBytes(candidate);
+            if (bytes) {
+                embeddedPath = candidate;
+                helperBytes = bytes;
+                break;
+            }
+        }
+
+        if (!embeddedPath || !helperBytes) {
+            throw new Error(`Embedded helper not found for arch ${process.arch}`);
+        }
+        const hash = crypto.createHash('sha1').update(helperBytes).digest('hex').slice(0, 12);
+        const outDir = path.join(os.tmpdir(), 'lyrics-smtc');
+        const outPath = path.join(outDir, `lyrics-smtc-bridge-${hash}.exe`);
+
+        fs.mkdirSync(outDir, { recursive: true });
+        if (!fs.existsSync(outPath)) {
+            fs.writeFileSync(outPath, helperBytes);
+        }
+
+        resolvedSmtcHelperPath = outPath;
+        return resolvedSmtcHelperPath;
+    } catch (error) {
+        logEvent('error', 'SMTC', `Failed extracting helper exe: ${error.message}`);
+        resolvedSmtcHelperPath = '';
+        return resolvedSmtcHelperPath;
+    }
+}
+
+function scheduleSmtcReconnect() {
+    if (smtcReconnectTimeout) {
+        clearTimeout(smtcReconnectTimeout);
+    }
+    const delay = Math.min(
+        BRIDGE_RECONNECT_BASE_DELAY_MS * Math.pow(2, smtcReconnectAttempts),
+        BRIDGE_RECONNECT_MAX_DELAY_MS
+    );
+    smtcReconnectAttempts += 1;
+    smtcReconnectTimeout = setTimeout(() => {
+        startSmtcBridge();
+    }, delay);
+}
+
+function handleSmtcPayload(payload) {
+    if (!payload || typeof payload !== 'object') return;
+    if (payload.error) {
+        logEvent('error', 'SMTC', payload.error);
+        return;
+    }
+
+    if (payload.hasSession === false) {
+        if (latestSongData) {
+            latestSongData = {
+                ...latestSongData,
+                isPaused: true,
+                sampledAtMs: Date.now()
+            };
+            lastPlaybackPaused = true;
+            broadcast({ type: 'playback_updated', data: latestSongData });
+        }
+        return;
+    }
+
+    const songData = normalizeSongData({
+        ...payload,
+        serverReceivedAtMs: Date.now()
+    });
+    if (!songData) return;
+    maybeBroadcastSongUpdate(songData);
+}
+
+function parseSmtcStdoutChunk(chunk) {
+    smtcStdoutBuffer += chunk.toString();
+    const lines = smtcStdoutBuffer.split(/\r?\n/);
+    smtcStdoutBuffer = lines.pop() || '';
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+            const payload = JSON.parse(trimmed);
+            handleSmtcPayload(payload);
+        } catch (error) {
+            logEvent('error', 'SMTC', `Invalid JSON from bridge: ${error.message}`);
+        }
+    }
+}
+
+function startSmtcBridge() {
+    if (smtcProcess) return;
+
+    let helperPath = resolveSmtcHelperPath();
+    if (!process.pkg && (!helperPath || !fs.existsSync(helperPath))) {
+        buildLocalSmtcHelperIfMissing(helperPath);
+        helperPath = resolveSmtcHelperPath();
+    }
+
+    if (!helperPath) {
+        logEvent('error', 'SMTC', 'Helper path is empty');
+        scheduleSmtcReconnect();
+        return;
+    }
+    smtcStdoutBuffer = '';
+    const child = spawn(helperPath, [], {
+        stdio: ['ignore', 'pipe', 'pipe']
+    });
+    smtcProcess = child;
+
+    child.stdout.on('data', parseSmtcStdoutChunk);
+    child.stderr.on('data', (data) => {
+        const message = data.toString().trim();
+        if (message) {
+            logEvent('error', 'SMTC', message);
+        }
+    });
+
+    child.on('spawn', () => {
+        smtcReconnectAttempts = 0;
+        logEvent('success', 'SMTC', `Bridge started (${helperPath})`);
+    });
+
+    child.on('close', (code) => {
+        smtcProcess = null;
+        logEvent('error', 'SMTC', `Bridge exited (code ${code ?? 'unknown'})`);
+        scheduleSmtcReconnect();
+    });
+
+    child.on('error', (error) => {
+        smtcProcess = null;
+        logEvent('error', 'SMTC', `Bridge failed to start: ${error.message}`);
+        scheduleSmtcReconnect();
+    });
+}
+
 loadLyricsCacheFromDisk().catch(() => {});
 
 server.listen(PORT, () => {
     logEvent('success', 'SERVER', `Lyrics server running on http://127.0.0.1:${PORT}/lyrics`);
-    logEvent('info', 'SERVER', `YouTube Music API endpoints: ${YT_MUSIC_API_URLS.join(', ')}`);
-    logEvent('info', 'SERVER', `Active API endpoint: ${getActiveApiUrl()}`);
-    logEvent('info', 'SERVER', `YouTube Music WebSocket: ${getWebSocketUrl()}`);
-    connectToYouTubeMusicWebSocket();
-    startSongPolling();
-    pollCurrentSong().catch((error) => {
-        logEvent('error', 'YTM', `Initial song fetch failed: ${error.message}`);
-    });
+    const helperSource = process.pkg ? 'embedded asset' : resolveSmtcHelperPath();
+    logEvent('info', 'SERVER', `SMTC helper source: ${helperSource}`);
+    startSmtcBridge();
 });

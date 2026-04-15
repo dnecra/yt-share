@@ -32,6 +32,7 @@
   "::ffff:192.168.99.31": ["RenderPC1"],
   "::ffff:192.168.99.32": ["RenderPC2"],
   "::ffff:192.168.99.22": ["sucha"],
+  "::ffff:192.168.99.20": ["danny","mamang","admin pemakan handal"],
   "::ffff:192.168.99.26": ["thalia"],
   "::ffff:192.168.99.23": ["vicky"],
   "::1": ["necra","roommaster","host","server","atmin","admin","df-arif","GM","arif"],

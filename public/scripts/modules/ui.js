@@ -82,12 +82,16 @@ export function handleWebSocketMessage(message) {
 
         case 'song_progress':
             if (message.data && message.data.elapsedSeconds !== undefined) {
-                const serverElapsed = message.data.elapsedSeconds;
+                const serverElapsed = Number(message.data.elapsedSeconds) || 0;
                 const serverDuration = message.data.songDuration;
                 const nowMs = Date.now();
+                const sampledAtMs = Number(message.data.sampledAtMs) || nowMs;
                 state.lastServerProgressAt = nowMs;
-                state.serverProgressBaseAt = nowMs;
-                state.serverProgressBaseElapsed = Number(serverElapsed) || 0;
+                state.lastProgressUpdate = serverElapsed;
+                state.serverProgressBaseAt = sampledAtMs;
+                state.serverProgressBaseElapsed = serverElapsed;
+                state.playbackAnchorAt = sampledAtMs;
+                state.playbackAnchorElapsed = serverElapsed;
 
                 const progressBar = document.getElementById('nowplaying-progress');
                 if (progressBar && serverDuration && serverDuration > 0) {
@@ -104,14 +108,19 @@ export function handleWebSocketMessage(message) {
                     rightProgressBar.value = (serverElapsed / serverDuration) * 100;
                 }
 
-                if (window.updateLyricsDisplay) window.updateLyricsDisplay(serverElapsed);
+                if (window.updateLyricsDisplay) {
+                    window.updateLyricsDisplay(serverElapsed, { trustedTiming: true });
+                }
 
                 if (state.currentSongData) {
                     state.currentSongData.elapsedSeconds = serverElapsed;
+                    state.currentSongData.sampledAtMs = sampledAtMs;
                     if (serverDuration) {
                         state.currentSongData.songDuration = serverDuration;
                     }
-                    state.lastProgressUpdate = serverElapsed;
+                    if (message.data.isPaused !== undefined) {
+                        state.currentSongData.isPaused = !!message.data.isPaused;
+                    }
                 }
             }
             break;

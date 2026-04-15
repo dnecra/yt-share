@@ -1,7 +1,7 @@
 import { API_URL, state, resetSongState } from './modules/config.js';
 import { initWebSocket } from './modules/connection.js';
-import { ensureLyricsSongInfoVisible, settleLyricsSongInfoReveal, updateNowPlayingFromData } from './modules/now-playing.js';
-import { updateLyricsDisplay, displayLyricsUI, hideLyricsUI, getLyricDisplayMode, setLyricDisplayMode, centerActiveLyricLineStrict } from './modules/lyric.js';
+import { ensureLyricsSongInfoVisible, updateNowPlayingFromData } from './modules/now-playing.js';
+import { fetchLyrics, updateLyricsDisplay, displayLyricsUI, hideLyricsUI, getLyricDisplayMode, setLyricDisplayMode, centerActiveLyricLineStrict } from './modules/lyric.js';
 import {
     initLyricDynamicTheme,
     getLyricDynamicThemeEnabled,
@@ -30,11 +30,6 @@ import {
     LAYOUT_POSITION_LABELS
 } from './modules/lyric-control.js';
 import { canonicalizeText, escapeHtml, escapeHtmlAttribute } from './modules/utils.js';
-
-// Enable "hide lines after active blank-note" only for dedicated lyrics page.
-window.__lyricsBlankCutoffEnabled = true;
-window.__lyricsLeadingGhostLinesCount = 1;
-window.__lyricsLeadingSpacingGhostLinesCount = 0;
 
 // Lyrics app specific state
 let lyricsContainerClickable = false;
@@ -323,10 +318,13 @@ let currentLyricFontSize = DEFAULT_FONT_SIZE;
 let lowResLyricFontSizeOffset = 0;
 let currentLyricFontWeightPreset = DEFAULT_LYRICS_PAGE_FONT_WEIGHT_PRESET;
 let currentLyricBackgroundPreset = DEFAULT_LYRIC_BACKGROUND_PRESET;
+let currentLyricRomanizationMode = 'both';
+let currentLyricTranslationExcludedLanguages = [];
 const lyricControlLabelTouched = {
     mode: false,
     font: false,
     background: false,
+    translation: false,
     position: false,
     dynamic: false,
     color: false
@@ -341,15 +339,65 @@ let currentLyricsMaxWidthVw = DEFAULT_LYRICS_PAGE_WIDTH_PERCENT;
 let currentLyricsDisplayMode = DEFAULT_LYRICS_PAGE_DISPLAY_MODE;
 let lyricsWidthDragActive = false;
 let lyricsWidthDragHandleSide = null;
+
+function normalizeTranslationExcludedLanguages(value) {
+    const values = Array.isArray(value)
+        ? value
+        : String(value || '')
+            .split(/[,\s]+/g)
+            .filter(Boolean);
+
+    return Array.from(new Set(values
+        .map((entry) => String(entry || '').trim().toLowerCase())
+        .filter(Boolean)));
+}
+
+function getLyricTranslationExcludedLanguages() {
+    return [...currentLyricTranslationExcludedLanguages];
+}
+
+function isTranslationLanguageExcluded(languageCode) {
+    const normalized = String(languageCode || '').trim().toLowerCase();
+    return !!normalized && currentLyricTranslationExcludedLanguages.includes(normalized);
+}
+
+function sanitizeLyricsTranslationPayload(data) {
+    if (!data || typeof data !== 'object') return data;
+    const translationLanguage = data.translationLanguage && typeof data.translationLanguage === 'object'
+        ? data.translationLanguage
+        : null;
+    const detectedLanguage = String(translationLanguage?.detectedLanguage || '').trim().toLowerCase();
+    const forceTranslate = translationLanguage?.forceTranslate === true;
+    if (!detectedLanguage || forceTranslate || !isTranslationLanguageExcluded(detectedLanguage)) {
+        return data;
+    }
+
+    const sanitized = { ...data };
+    delete sanitized.translatedSyncedLyrics;
+    delete sanitized.englishSyncedLyrics;
+    sanitized.translationState = 'excluded';
+    sanitized.translationLanguage = {
+        ...translationLanguage,
+        isExcluded: true,
+        excludedLanguages: getLyricTranslationExcludedLanguages()
+    };
+    return sanitized;
+}
 let isWidthShortcutHeld = false;
 let isWidthControlHovered = false;
 let isLyricsWindowHovered = false;
 let widthControlAutoHideTimeout = null;
+let translationToggleVisibilityObserver = null;
 let wheelResizeAnchorRaf = null;
 let wheelResizeFreezeTimeout = null;
 let applyLyricSizingRaf = null;
 let windowResizeRaf = null;
 let windowResizeSettleTimeout = null;
+let deferredScrollCenterTimeout = null;
+let revealScrollCenterToken = 0;
+let lyricAssistRetryTimeout = null;
+let lyricAssistRetryVideoId = '';
+let lyricAssistRetryCount = 0;
 let configuredLyricsMinWidthVwCache = null;
 let configuredLyricsMaxWidthVwCache = null;
 const WHEEL_RESIZE_ACTIVE_LINE_FREEZE_MS = 650;
@@ -377,6 +425,14 @@ function getAuthoredRootCssPercentVar(name, fallback) {
 }
 
 function getCssPercentVar(name, fallback) {
+    const root = document.documentElement;
+    if (!root) return fallback;
+    const raw = getComputedStyle(root).getPropertyValue(name).trim();
+    const parsed = parseFloat(raw);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function getCssPxVar(name, fallback) {
     const root = document.documentElement;
     if (!root) return fallback;
     const raw = getComputedStyle(root).getPropertyValue(name).trim();
@@ -534,15 +590,21 @@ function syncLyricsViewportHeight() {
         .filter((value) => Number.isFinite(value) && value > 0);
 
     const fallbackLineHeight = parseFloat(rootStyles.getPropertyValue('--lyric-line-height')) || 40;
-    const fallbackGap = parseFloat(rootStyles.getPropertyValue('--lyrics-line-outer-gap')) || 16;
+    const fallbackGap = parseFloat(rootStyles.getPropertyValue('--lyrics-line-gap'))
+        || parseFloat(rootStyles.getPropertyValue('--lyrics-line-outer-gap'))
+        || 16;
     const singleRowHeight = measuredRowHeights.length > 0
         ? Math.max(...measuredRowHeights)
         : (fallbackLineHeight + fallbackGap);
     const viewportHeight = Math.max(1, Math.round(singleRowHeight * visibleLines));
-    const fadeSize = Math.max(12, Math.min(160, Math.round(singleRowHeight * 0.9)));
-
     root.style.setProperty('--lyrics-viewport-height', `${viewportHeight}px`);
-    root.style.setProperty('--lyrics-edge-fade-size', `${fadeSize}px`);
+
+    // Keep edge feather proportional to the live viewport height so resizing
+    // lyric font size does not leave the mask looking stale or overextended.
+    const edgeFadeSize = Math.max(24, Math.min(128, Math.round(viewportHeight * 0.22)));
+    const edgeFadeSizeTop = Math.max(edgeFadeSize, Math.round(edgeFadeSize * 1.5));
+    root.style.setProperty('--lyrics-edge-fade-size', `${edgeFadeSize}px`);
+    root.style.setProperty('--lyrics-edge-fade-size-top', `${edgeFadeSizeTop}px`);
 }
 
 function syncCenterViewportMaxHeight() {
@@ -575,23 +637,18 @@ function runViewportSyncAndRecenter() {
         viewportSyncTimeout = null;
     }
 
-    const viewportWidth = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
-    const layoutContainer = document.getElementById('layout-container');
-    const isMobileCenterScroll =
-        viewportWidth <= 767
-        && !!layoutContainer?.classList.contains('position-center')
-        && getLyricDisplayMode() === 'scroll';
-    const activeIndex = isMobileCenterScroll ? captureCurrentActiveLyricIndex() : -1;
+    const shouldCenterActiveLine = getLyricDisplayMode() === 'scroll';
+    const activeIndex = shouldCenterActiveLine ? captureCurrentActiveLyricIndex() : -1;
     scheduleViewportSync();
 
     if (recenterAfterResizeRaf) cancelAnimationFrame(recenterAfterResizeRaf);
     recenterAfterResizeRaf = requestAnimationFrame(() => {
         recenterAfterResizeRaf = requestAnimationFrame(() => {
             recenterAfterResizeRaf = null;
-            if (!isMobileCenterScroll || activeIndex < 0) return;
+            if (!shouldCenterActiveLine || activeIndex < 0) return;
             const lyricsContainer = document.getElementById('lyrics-container');
             if (!lyricsContainer) return;
-            centerActiveLyricLineStrict(activeIndex, lyricsContainer);
+            centerActiveLyricLineStrict(activeIndex, lyricsContainer, { behavior: 'instant' });
         });
     });
 }
@@ -601,6 +658,56 @@ function scheduleViewportSyncAndRecenter() {
     viewportSyncTimeout = setTimeout(() => {
         runViewportSyncAndRecenter();
     }, 16);
+}
+
+function centerCurrentScrollModeActiveLine({ behavior = 'instant' } = {}) {
+    if (getLyricDisplayMode() !== 'scroll') return;
+    const lyricsContainer = document.getElementById('lyrics-container');
+    const activeIndex = captureCurrentActiveLyricIndex();
+    if (!lyricsContainer || activeIndex < 0) return;
+    centerActiveLyricLineStrict(activeIndex, lyricsContainer, { behavior });
+}
+
+function scheduleDeferredScrollCenter(delayMs = 0) {
+    if (deferredScrollCenterTimeout) {
+        clearTimeout(deferredScrollCenterTimeout);
+        deferredScrollCenterTimeout = null;
+    }
+    deferredScrollCenterTimeout = setTimeout(() => {
+        deferredScrollCenterTimeout = null;
+        scheduleViewportSync();
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                centerCurrentScrollModeActiveLine({ behavior: 'instant' });
+            });
+        });
+    }, Math.max(0, Number(delayMs) || 0));
+}
+
+function scheduleScrollCenterAfterReveal() {
+    const token = ++revealScrollCenterToken;
+    const containers = ['synced-lyrics', 'plain-lyrics']
+        .map((id) => document.getElementById(id))
+        .filter(Boolean);
+    if (containers.length === 0) return;
+
+    let finished = false;
+    const cleanup = () => {
+        containers.forEach((el) => el.removeEventListener('transitionend', onTransitionEnd));
+    };
+    const done = () => {
+        if (finished || token !== revealScrollCenterToken) return;
+        finished = true;
+        cleanup();
+        scheduleDeferredScrollCenter(0);
+    };
+    const onTransitionEnd = (event) => {
+        if (event?.propertyName && event.propertyName !== 'transform') return;
+        done();
+    };
+
+    containers.forEach((el) => el.addEventListener('transitionend', onTransitionEnd));
+    scheduleDeferredScrollCenter(1100);
 }
 
 function getLyricsScrollContainer() {
@@ -623,7 +730,14 @@ function captureActiveLyricAnchor() {
 
     const lineRect = activeLine.getBoundingClientRect();
     const scrollRect = scrollContainer.getBoundingClientRect();
-    const centerOffset = (lineRect.top - scrollRect.top) + (lineRect.height / 2);
+    // Use single-row height so wrapped multi-line blocks anchor to their first
+    // row — consistent with getStableCenterTargetTop in lyric.js.
+    const computedStyle = window.getComputedStyle(activeLine);
+    const singleRowHeight = Math.min(
+        parseFloat(computedStyle.lineHeight) || lineRect.height,
+        lineRect.height
+    );
+    const centerOffset = (lineRect.top - scrollRect.top) + (singleRowHeight / 2);
     const index = Number.parseInt(activeLine.dataset.index || '-1', 10);
     if (!Number.isFinite(index) || index < 0) return null;
 
@@ -653,7 +767,12 @@ function restoreActiveLyricAnchor(anchor) {
 
     const lineRect = lineElement.getBoundingClientRect();
     const scrollRect = scrollContainer.getBoundingClientRect();
-    const currentCenterOffset = (lineRect.top - scrollRect.top) + (lineRect.height / 2);
+    const computedStyle = window.getComputedStyle(lineElement);
+    const singleRowHeight = Math.min(
+        parseFloat(computedStyle.lineHeight) || lineRect.height,
+        lineRect.height
+    );
+    const currentCenterOffset = (lineRect.top - scrollRect.top) + (singleRowHeight / 2);
     const delta = currentCenterOffset - anchor.centerOffset;
     if (Math.abs(delta) <= 0.5) return;
 
@@ -867,14 +986,17 @@ function applyLyricSizing({ recenter = true } = {}) {
         effectiveFontSize += 4;
     }
     const lineHeight = Math.round(effectiveFontSize * 1.16);
-    const outerGap = Math.max(8, Math.round(effectiveFontSize * 0.2));
+    const baseGap = getCssPxVar('--lyrics-line-gap', 16);
+    const outerGap = Math.max(8, Math.round((effectiveFontSize / DEFAULT_FONT_SIZE) * baseGap));
     const romanizedSize = effectiveFontSize * 0.6;
 
     if (applyLyricSizingRaf) cancelAnimationFrame(applyLyricSizingRaf);
     applyLyricSizingRaf = requestAnimationFrame(() => {
         applyLyricSizingRaf = null;
+        const lineHeightRatio = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--lyric-line-height-ratio')) || 0.5;
         document.documentElement.style.setProperty('--lyric-font-size', `${effectiveFontSize}px`, cssPriority);
         document.documentElement.style.setProperty('--lyric-line-height', `${lineHeight}px`, cssPriority);
+        document.documentElement.style.setProperty('--lyric-line-height-actual', `${Math.round(lineHeight * lineHeightRatio)}px`, cssPriority);
         document.documentElement.style.setProperty('--lyrics-line-outer-gap', `${outerGap}px`, cssPriority);
         document.documentElement.style.setProperty('--lyric-romanized-size', `${romanizedSize}px`, cssPriority);
         syncCenterViewportMaxHeight();
@@ -892,6 +1014,7 @@ function syncWidthControlButtonMetrics() {
     const modeButton = document.getElementById('lyrics-display-mode-toggle');
     const weightButton = document.getElementById('lyrics-font-weight-toggle');
     const backgroundButton = document.getElementById('lyrics-background-toggle');
+    const translationButton = document.getElementById('lyrics-translation-toggle');
     const dynamicThemeToggleButton = document.getElementById('lyrics-dynamic-theme-toggle');
     const themeColorCycleButton = document.getElementById('lyrics-theme-color-cycle');
     if (
@@ -900,6 +1023,7 @@ function syncWidthControlButtonMetrics() {
         || !modeButton
         || !weightButton
         || !backgroundButton
+        || !translationButton
         || !dynamicThemeToggleButton
         || !themeColorCycleButton
     ) return;
@@ -908,6 +1032,8 @@ function syncWidthControlButtonMetrics() {
     const modeWidth = Math.ceil(modeButton.offsetWidth);
     const weightWidth = Math.ceil(weightButton.offsetWidth);
     const backgroundWidth = Math.ceil(backgroundButton.offsetWidth);
+    const translationVisible = !!(translationButton.offsetParent && !translationButton.hidden);
+    const translationWidth = translationVisible ? Math.ceil(translationButton.offsetWidth) : 0;
     const dynamicThemeToggleVisible = !!(dynamicThemeToggleButton.offsetParent && !dynamicThemeToggleButton.hidden);
     const dynamicThemeToggleWidth = dynamicThemeToggleVisible ? Math.ceil(dynamicThemeToggleButton.offsetWidth) : 0;
     const themeColorCycleWidth = Math.ceil(themeColorCycleButton.offsetWidth);
@@ -915,27 +1041,34 @@ function syncWidthControlButtonMetrics() {
     const modeOffset = positionWidth + gap;
     const weightOffset = positionWidth + modeWidth + (gap * 2);
     const backgroundOffset = weightOffset + weightWidth + gap;
-    const dynamicThemeToggleOffset = backgroundOffset + backgroundWidth + gap;
+    const translationOffset = backgroundOffset + backgroundWidth + gap;
+    const dynamicThemeToggleOffset = translationVisible
+        ? translationOffset + translationWidth + gap
+        : backgroundOffset + backgroundWidth + gap;
     const themeColorCycleOffset = dynamicThemeToggleVisible
         ? dynamicThemeToggleOffset + dynamicThemeToggleWidth + gap
-        : backgroundOffset + backgroundWidth + gap;
+        : dynamicThemeToggleOffset;
     const totalWidth = dynamicThemeToggleVisible
-        ? positionWidth + modeWidth + weightWidth + backgroundWidth + dynamicThemeToggleWidth + themeColorCycleWidth + (gap * 5)
-        : positionWidth + modeWidth + weightWidth + backgroundWidth + themeColorCycleWidth + (gap * 4);
+        ? positionWidth + modeWidth + weightWidth + backgroundWidth + translationWidth + dynamicThemeToggleWidth + themeColorCycleWidth + (gap * (translationVisible ? 6 : 5))
+        : positionWidth + modeWidth + weightWidth + backgroundWidth + translationWidth + themeColorCycleWidth + (gap * (translationVisible ? 5 : 4));
     widthControl.style.setProperty('--lyrics-control-buttons-width', `${totalWidth}px`);
     widthControl.style.setProperty('--lyrics-mode-toggle-left', `${modeOffset}px`);
     widthControl.style.setProperty('--lyrics-font-weight-toggle-left', `${weightOffset}px`);
     widthControl.style.setProperty('--lyrics-background-toggle-left', `${backgroundOffset}px`);
+    widthControl.style.setProperty('--lyrics-translation-toggle-left', `${translationOffset}px`);
     widthControl.style.setProperty('--lyrics-dynamic-theme-toggle-left', `${dynamicThemeToggleOffset}px`);
     widthControl.style.setProperty('--lyrics-theme-color-cycle-left', `${themeColorCycleOffset}px`);
     widthControl.style.setProperty('--lyrics-position-toggle-right', `0px`);
     widthControl.style.setProperty('--lyrics-mode-toggle-right', `${positionWidth + gap}px`);
     widthControl.style.setProperty('--lyrics-font-weight-toggle-right', `${positionWidth + modeWidth + (gap * 2)}px`);
     widthControl.style.setProperty('--lyrics-background-toggle-right', `${positionWidth + modeWidth + weightWidth + (gap * 3)}px`);
-    widthControl.style.setProperty('--lyrics-dynamic-theme-toggle-right', `${positionWidth + modeWidth + weightWidth + backgroundWidth + (gap * 4)}px`);
-    widthControl.style.setProperty('--lyrics-theme-color-cycle-right', dynamicThemeToggleVisible
-        ? `${positionWidth + modeWidth + weightWidth + backgroundWidth + dynamicThemeToggleWidth + (gap * 5)}px`
+    widthControl.style.setProperty('--lyrics-translation-toggle-right', `${positionWidth + modeWidth + weightWidth + backgroundWidth + (gap * 4)}px`);
+    widthControl.style.setProperty('--lyrics-dynamic-theme-toggle-right', translationVisible
+        ? `${positionWidth + modeWidth + weightWidth + backgroundWidth + translationWidth + (gap * 5)}px`
         : `${positionWidth + modeWidth + weightWidth + backgroundWidth + (gap * 4)}px`);
+    widthControl.style.setProperty('--lyrics-theme-color-cycle-right', dynamicThemeToggleVisible
+        ? `${positionWidth + modeWidth + weightWidth + backgroundWidth + translationWidth + dynamicThemeToggleWidth + (gap * (translationVisible ? 6 : 5))}px`
+        : `${positionWidth + modeWidth + weightWidth + backgroundWidth + translationWidth + (gap * (translationVisible ? 5 : 4))}px`);
 }
 
 function handleSongInfoScroll(event) {
@@ -994,6 +1127,8 @@ function saveSettings() {
         lyricsDisplayMode: currentLyricsDisplayMode,
         lyricFontWeightPreset: currentLyricFontWeightPreset,
         lyricBackgroundPreset: currentLyricBackgroundPreset,
+        lyricRomanizationMode: currentLyricRomanizationMode,
+        lyricTranslationExcludedLanguages: currentLyricTranslationExcludedLanguages,
         dynamicThemeEnabled: getLyricDynamicThemeEnabled(),
         themeColorIndex: currentManualLyricThemeColorIndex,
     };
@@ -1015,6 +1150,84 @@ function normalizeLyricBackgroundPreset(preset) {
     const normalized = preset.trim().toLowerCase();
     if (normalized === 'soft') return 'solid';
     return LYRIC_BACKGROUND_ORDER.includes(normalized) ? normalized : DEFAULT_LYRIC_BACKGROUND_PRESET;
+}
+
+function normalizeLyricRomanizationMode(mode) {
+    if (typeof mode !== 'string') return 'both';
+    const normalized = mode.trim().toLowerCase();
+    return ['romanized', 'both', 'off'].includes(normalized) ? normalized : 'both';
+}
+
+function hasRenderedRomanizedLines() {
+    return !!document.querySelector('#synced-lyrics .romanized, #plain-lyrics .romanized');
+}
+
+function hasRenderedTranslationLines() {
+    return !!document.querySelector('#synced-lyrics .lyric-translation, #plain-lyrics .lyric-translation');
+}
+
+function getLyricAssistCapabilities() {
+    return {
+        hasRomanized: hasRenderedRomanizedLines(),
+        hasTranslation: hasRenderedTranslationLines()
+    };
+}
+
+function getLyricAssistToggleOrder() {
+    const { hasRomanized, hasTranslation } = getLyricAssistCapabilities();
+    if (hasRomanized && hasTranslation) return ['romanized', 'both', 'off'];
+    if (hasTranslation) return ['both', 'off'];
+    if (hasRomanized) return ['romanized', 'off'];
+    return ['both', 'off'];
+}
+
+function normalizeLyricAssistModeForAvailableContent(mode) {
+    const normalized = normalizeLyricRomanizationMode(mode);
+    const order = getLyricAssistToggleOrder();
+    if (order.includes(normalized)) return normalized;
+    return order[0] || 'off';
+}
+
+function applyLyricRomanizationMode(mode, { persist = true } = {}) {
+    currentLyricRomanizationMode = normalizeLyricAssistModeForAvailableContent(mode);
+    const root = document.documentElement;
+    root.classList.toggle('lyrics-translation-hidden', currentLyricRomanizationMode !== 'both');
+    root.classList.toggle('lyrics-romanization-off', currentLyricRomanizationMode === 'off');
+    updateLyricsTranslationToggleLabel();
+    requestAnimationFrame(() => {
+        scheduleViewportSyncAndRecenter();
+    });
+    if (persist) saveSettings();
+}
+
+function hasVisibleLyricAssistLines() {
+    const { hasRomanized, hasTranslation } = getLyricAssistCapabilities();
+    return hasRomanized || hasTranslation;
+}
+
+function syncTranslationToggleVisibility() {
+    const btn = document.getElementById('lyrics-translation-toggle');
+    if (!btn) return;
+    const visible = hasVisibleLyricAssistLines();
+    btn.hidden = !visible;
+    btn.style.display = visible ? '' : 'none';
+    btn.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    syncWidthControlButtonMetrics();
+}
+
+function initTranslationToggleVisibilityObserver() {
+    if (translationToggleVisibilityObserver || typeof MutationObserver === 'undefined') return;
+    const synced = document.getElementById('synced-lyrics');
+    const plain = document.getElementById('plain-lyrics');
+    if (!synced && !plain) return;
+
+    translationToggleVisibilityObserver = new MutationObserver(() => {
+        syncTranslationToggleVisibility();
+    });
+
+    if (synced) translationToggleVisibilityObserver.observe(synced, { childList: true, subtree: true });
+    if (plain) translationToggleVisibilityObserver.observe(plain, { childList: true, subtree: true });
+    syncTranslationToggleVisibility();
 }
 
 function loadSettings() {
@@ -1107,6 +1320,7 @@ function resetLyricControlHoverLabels() {
     lyricControlLabelTouched.mode = false;
     lyricControlLabelTouched.font = false;
     lyricControlLabelTouched.background = false;
+    lyricControlLabelTouched.translation = false;
     lyricControlLabelTouched.position = false;
     lyricControlLabelTouched.dynamic = false;
     lyricControlLabelTouched.color = false;
@@ -1162,6 +1376,43 @@ function updateLyricsBackgroundToggleLabel() {
     }
     btn.setAttribute('aria-label', `Switch lyric background (current: ${preset.label})`);
     btn.setAttribute('title', `Background: ${preset.label}`);
+    syncWidthControlButtonMetrics();
+}
+
+function updateLyricsTranslationToggleLabel() {
+    const btn = document.getElementById('lyrics-translation-toggle');
+    if (!btn) return;
+    syncTranslationToggleVisibility();
+    if (btn.hidden) return;
+    const { hasRomanized, hasTranslation } = getLyricAssistCapabilities();
+    const isTranslationOnly = hasTranslation && !hasRomanized;
+    const mode = normalizeLyricAssistModeForAvailableContent(currentLyricRomanizationMode);
+    currentLyricRomanizationMode = mode;
+
+    const labelMap = isTranslationOnly
+        ? {
+            both: 'Translated',
+            off: 'Off'
+        }
+        : {
+            romanized: 'Romanized',
+            both: 'Translated',
+            off: 'Off'
+        };
+    const titleMap = isTranslationOnly
+        ? {
+            both: 'Translation: On',
+            off: 'Translation: Off'
+        }
+        : {
+            romanized: 'Romanization: On',
+            both: 'Romanization + Translation: On',
+            off: 'Romanization + Translation: Off'
+        };
+    const baseLabel = isTranslationOnly ? 'Translation' : 'Romanization';
+    setLyricButtonLabel(btn, lyricControlLabelTouched.translation ? (labelMap[mode] || 'Off') : baseLabel);
+    btn.setAttribute('aria-label', `Cycle lyric ${isTranslationOnly ? 'translation' : 'romanization'} mode (current: ${labelMap[mode] || 'Off'})`);
+    btn.setAttribute('title', titleMap[mode] || `${baseLabel}: Off`);
     syncWidthControlButtonMetrics();
 }
 
@@ -1246,6 +1497,14 @@ function cycleLyricThemeColorButton() {
     cycleLyricThemeButton();
 }
 
+function toggleLyricTranslationButton() {
+    lyricControlLabelTouched.translation = true;
+    const order = getLyricAssistToggleOrder();
+    const currentIndex = order.indexOf(normalizeLyricAssistModeForAvailableContent(currentLyricRomanizationMode));
+    const nextMode = order[(currentIndex + 1) % order.length];
+    applyLyricRomanizationMode(nextMode, { persist: true });
+}
+
 function cycleLyricThemeButton() {
     lyricControlLabelTouched.color = true;
     const dynamicEnabled = getLyricDynamicThemeEnabled();
@@ -1277,6 +1536,7 @@ function updateAllLyricControlLabels() {
     updateLyricsDisplayModeToggleLabel();
     updateLyricsFontWeightToggleLabel();
     updateLyricsBackgroundToggleLabel();
+    updateLyricsTranslationToggleLabel();
     updateLyricsDynamicThemeToggleLabel();
     updateLyricsThemeColorCycleLabel();
 }
@@ -1305,6 +1565,9 @@ function applyLyricsDisplayMode(mode, { persist = true, refresh = true } = {}) {
     setLyricDisplayMode(normalized, { refresh });
     updateLyricsDisplayModeToggleLabel();
     scheduleViewportSyncAndRecenter();
+    if (normalized === 'scroll') {
+        scheduleDeferredScrollCenter(120);
+    }
     if (persist) saveSettings();
 }
 
@@ -1318,8 +1581,9 @@ function applyLyricFontWeightPreset(preset, { persist = true } = {}) {
     const normalized = normalizeLyricFontWeightPreset(preset);
     const config = LYRIC_FONT_WEIGHT_PRESETS[normalized] || LYRIC_FONT_WEIGHT_PRESETS.regular;
     currentLyricFontWeightPreset = normalized;
-    document.documentElement.style.setProperty('--lyrics-inactive-font-weight', String(config.inactive));
-    document.documentElement.style.setProperty('--lyrics-active-font-weight', String(config.active));
+    document.documentElement.style.setProperty('--lyrics-inactive-font-weight', String(config.main));
+    document.documentElement.style.setProperty('--lyrics-active-font-weight', String(config.main));
+    document.documentElement.style.setProperty('--lyrics-translation-font-weight', String(config.translation));
     updateLyricsFontWeightToggleLabel();
     if (persist) saveSettings();
 }
@@ -1679,6 +1943,11 @@ function applySavedSettings() {
         });
         applyLyricFontWeightPreset(settings.lyricFontWeightPreset || DEFAULT_LYRICS_PAGE_FONT_WEIGHT_PRESET, { persist: false });
         applyLyricBackgroundPreset(settings.lyricBackgroundPreset || DEFAULT_LYRIC_BACKGROUND_PRESET, { persist: false });
+        currentLyricTranslationExcludedLanguages = normalizeTranslationExcludedLanguages(settings.lyricTranslationExcludedLanguages);
+        window.__lyricTranslationExcludedLanguages = getLyricTranslationExcludedLanguages();
+        const savedRomanizationMode = settings.lyricRomanizationMode
+            || (settings.lyricTranslationEnabled === true ? 'both' : 'both');
+        applyLyricRomanizationMode(savedRomanizationMode, { persist: false });
 
         syncWidthControlPositionClass();
         updateLyricsPositionToggleLabel();
@@ -1697,6 +1966,9 @@ function applySavedSettings() {
         });
         applyLyricFontWeightPreset(DEFAULT_LYRICS_PAGE_FONT_WEIGHT_PRESET, { persist: false });
         applyLyricBackgroundPreset(DEFAULT_LYRIC_BACKGROUND_PRESET, { persist: false });
+        currentLyricTranslationExcludedLanguages = [];
+        window.__lyricTranslationExcludedLanguages = [];
+        applyLyricRomanizationMode('both', { persist: false });
     }
 
     applyLyricSizing();
@@ -1938,7 +2210,22 @@ function initializeLyricsWidthHandle() {
 function displayLyrics(data, fetchVideoId) {
     const normalizeVideoId = (value) => (value === undefined || value === null) ? '' : String(value).trim();
     const targetVideoId = normalizeVideoId(fetchVideoId);
-    const result = displayLyricsUI(data, {
+    const safeData = sanitizeLyricsTranslationPayload(data);
+    const translationState = String(safeData?.translationState || '').trim().toLowerCase();
+    const translationLanguage = safeData?.translationLanguage && typeof safeData.translationLanguage === 'object'
+        ? safeData.translationLanguage
+        : null;
+    if (state.currentSongData && normalizeVideoId(state.currentVideoId) === targetVideoId) {
+        state.currentSongData = {
+            ...state.currentSongData,
+            lyricsTranslationState: translationState || state.currentSongData.lyricsTranslationState || '',
+            lyricsTranslationLanguage: translationLanguage || state.currentSongData.lyricsTranslationLanguage || null
+        };
+    }
+    if (translationLanguage?.detectedLanguage) {
+        console.log(`[LYRICS] Translation language detected: ${translationLanguage.detectedLanguage}${translationLanguage.isExcluded ? ' (excluded)' : ''}`);
+    }
+    const result = displayLyricsUI(safeData, {
         fetchVideoId,
         validateFetch: () => {
             const currentVideoId = normalizeVideoId(state.currentVideoId);
@@ -1950,8 +2237,15 @@ function displayLyrics(data, fetchVideoId) {
         },
         logTag: 'LYRICS'
     });
-    settleLyricsSongInfoReveal();
     requestAnimationFrame(() => runViewportSyncAndRecenter());
+    scheduleScrollCenterAfterReveal();
+    requestAnimationFrame(() => {
+        if (normalizeVideoId(state.currentVideoId) !== targetVideoId) return;
+        const hasRomanizableLines = !!document.querySelector('#synced-lyrics .lyric-line.romanizable, #plain-lyrics .lyric-line.romanizable');
+        const missingRomanization = hasRomanizableLines && !hasRenderedRomanizedLines();
+        if (!missingRomanization) return;
+        scheduleLyricAssistRecovery('post-render', 1600);
+    });
     return result;
 }
 
@@ -1960,11 +2254,114 @@ function hideLyrics() {
         clearVideoId: true,
         logTag: 'LYRICS'
     });
-    settleLyricsSongInfoReveal();
     return result;
 }
 
-async function refreshSongStateFromServer() {
+function refreshCurrentLyricsTranslationPreference(reason = 'translation-preference-change') {
+    const songData = state.currentSongData;
+    const videoId = typeof songData?.videoId === 'string' ? songData.videoId.trim() : '';
+    const artist = typeof songData?.artist === 'string' ? songData.artist.trim() : '';
+    const title = typeof songData?.title === 'string' ? songData.title.trim() : '';
+    if (!videoId || !artist || !title) return null;
+
+    if ((Number(state.lyricsCandidateOffset || 0) || 0) > 0) {
+        console.log(`[LYRICS] Refreshing lyric candidate for ${reason}`);
+        return fetchLyricsCandidateOffset(Number(state.lyricsCandidateOffset || 0) || 0);
+    }
+
+    console.log(`[LYRICS] Refreshing lyrics for ${reason}`);
+    return fetchLyrics(
+        artist,
+        title,
+        songData.album || '',
+        songData.songDuration || 0,
+        displayLyrics,
+        hideLyrics
+    );
+}
+
+function setLyricTranslationExcludedLanguages(languages, { persist = true, refresh = true } = {}) {
+    currentLyricTranslationExcludedLanguages = normalizeTranslationExcludedLanguages(languages);
+    window.__lyricTranslationExcludedLanguages = getLyricTranslationExcludedLanguages();
+    if (persist) saveSettings();
+    if (refresh) {
+        Promise.resolve(refreshCurrentLyricsTranslationPreference('translation-exclusion-update')).catch((error) => {
+            console.warn('[LYRICS] Failed to refresh lyrics after translation exclusion update:', error);
+        });
+    }
+    console.log('[LYRICS] Translation exclusions:', currentLyricTranslationExcludedLanguages);
+    return getLyricTranslationExcludedLanguages();
+}
+
+function toggleLyricTranslationExcludedLanguage(languageCode, options = {}) {
+    const normalized = normalizeTranslationExcludedLanguages([languageCode])[0];
+    if (!normalized) {
+        return getLyricTranslationExcludedLanguages();
+    }
+
+    const next = new Set(currentLyricTranslationExcludedLanguages);
+    if (next.has(normalized)) {
+        next.delete(normalized);
+    } else {
+        next.add(normalized);
+    }
+    return setLyricTranslationExcludedLanguages(Array.from(next), options);
+}
+
+function retryLyricAssistFetchIfMissing(reason = '') {
+    const songData = state.currentSongData;
+    const videoId = typeof songData?.videoId === 'string' ? songData.videoId.trim() : '';
+    const artist = typeof songData?.artist === 'string' ? songData.artist.trim() : '';
+    const title = typeof songData?.title === 'string' ? songData.title.trim() : '';
+    if (!videoId || !artist || !title) return;
+    if (state.currentFetchVideoId === videoId) return;
+    if (state.lastFetchedVideoId !== videoId) return;
+    if (!Array.isArray(state.currentLyrics) || state.currentLyrics.length === 0) return;
+
+    const hasRomanizableLines = !!document.querySelector('#synced-lyrics .lyric-line.romanizable, #plain-lyrics .lyric-line.romanizable');
+    const hasRomanized = hasRenderedRomanizedLines();
+    const needsRomanizationRecovery = hasRomanizableLines && !hasRomanized;
+    if (!needsRomanizationRecovery) return;
+
+    console.log(`[LYRICS] Re-fetching current song to recover missing romanized lyrics${reason ? ` (${reason})` : ''}`);
+    fetchLyrics(
+        artist,
+        title,
+        songData.album || '',
+        songData.songDuration || 0,
+        displayLyrics,
+        hideLyrics
+    );
+}
+
+function scheduleLyricAssistRecovery(reason = '', delayMs = 1400) {
+    const songData = state.currentSongData;
+    const videoId = typeof songData?.videoId === 'string' ? songData.videoId.trim() : '';
+    if (!videoId) return;
+
+    if (lyricAssistRetryVideoId !== videoId) {
+        lyricAssistRetryVideoId = videoId;
+        lyricAssistRetryCount = 0;
+    }
+
+    if (lyricAssistRetryCount >= 2) return;
+    if (lyricAssistRetryTimeout) {
+        clearTimeout(lyricAssistRetryTimeout);
+        lyricAssistRetryTimeout = null;
+    }
+
+    lyricAssistRetryTimeout = setTimeout(() => {
+        lyricAssistRetryTimeout = null;
+        lyricAssistRetryCount += 1;
+        retryLyricAssistFetchIfMissing(reason);
+    }, Math.max(250, Number(delayMs) || 1400));
+}
+
+function resolveInitialBootVisibility() {
+    document.body?.classList.remove('lyrics-booting');
+}
+
+async function refreshSongStateFromServer(options = {}) {
     try {
         const response = await fetch(`${API_URL}/song`, {
             cache: 'no-store'
@@ -1973,19 +2370,25 @@ async function refreshSongStateFromServer() {
             if (response.status !== 404) {
                 console.warn(`[LYRICS] Failed to refresh song state: HTTP ${response.status}`);
             }
+            resolveInitialBootVisibility();
             return;
         }
 
         const data = await response.json();
-        if (!data || typeof data !== 'object' || !data.videoId) return;
+        if (!data || typeof data !== 'object' || !data.videoId) {
+            resolveInitialBootVisibility();
+            return;
+        }
 
         updateNowPlayingFromData(data, {
             isMainApp: false,
             onLyricsDisplay: displayLyrics,
             onLyricsHide: hideLyrics
         });
+        resolveInitialBootVisibility();
     } catch (error) {
         console.warn('[LYRICS] Failed to refresh song state from server:', error);
+        resolveInitialBootVisibility();
     }
 }
 
@@ -1999,11 +2402,14 @@ function handleWebSocketMessage(message) {
                     onLyricsDisplay: displayLyrics,
                     onLyricsHide: hideLyrics
                 });
+                resolveInitialBootVisibility();
             }
             break;
 
         case 'lyrics_updated':
             if (message.data && message.data.videoId === state.currentVideoId) {
+                state.lyricsCandidateOffset = Number(message.data.candidateOffset || 0) || 0;
+                state.lyricsCandidateTotal = Number(message.data.totalCandidates || 0) || 0;
                 console.log(`[LYRICS] Received shared lyrics for: ${message.data.title} by ${message.data.artist}`);
                 displayLyrics(message.data.lyrics, message.data.videoId);
             }
@@ -2011,15 +2417,16 @@ function handleWebSocketMessage(message) {
 
         case 'song_progress':
             if (message.data && message.data.elapsedSeconds !== undefined) {
-                const serverElapsed = message.data.elapsedSeconds;
+                const serverElapsed = Number(message.data.elapsedSeconds) || 0;
                 const serverDuration = message.data.songDuration;
                 const nowMs = Date.now();
+                const sampledAtMs = Number(message.data.sampledAtMs) || nowMs;
                 state.lastServerProgressAt = nowMs;
                 state.lastProgressUpdate = serverElapsed;
-                state.serverProgressBaseAt = Number(message.data.sampledAtMs) || nowMs;
-                state.serverProgressBaseElapsed = Number(serverElapsed) || 0;
-                state.playbackAnchorAt = Number(message.data.sampledAtMs) || nowMs;
-                state.playbackAnchorElapsed = Number(serverElapsed) || 0;
+                state.serverProgressBaseAt = sampledAtMs;
+                state.serverProgressBaseElapsed = serverElapsed;
+                state.playbackAnchorAt = sampledAtMs;
+                state.playbackAnchorElapsed = serverElapsed;
 
                 if (message.data.isPaused !== undefined && !window.manuallyPaused) {
                     state.isPaused = message.data.isPaused;
@@ -2029,7 +2436,12 @@ function handleWebSocketMessage(message) {
                         document.body.classList.remove('paused');
                     }
                 }
+                resolveInitialBootVisibility();
 
+                // Keep ongoing progress updates aligned with the old server
+                // behavior. The startup anchor is already corrected elsewhere,
+                // so the recurring progress path should use the raw sampled
+                // server time to avoid adjacent-line jitter.
                 updateLyricsDisplay(serverElapsed, { trustedTiming: true });
 
                 if (state.currentSongData) {
@@ -2051,6 +2463,7 @@ function handleWebSocketMessage(message) {
                     onLyricsDisplay: displayLyrics,
                     onLyricsHide: hideLyrics
                 });
+                resolveInitialBootVisibility();
             }
             break;
 
@@ -2096,6 +2509,7 @@ async function init() {
         cycleLyricsDisplayMode,
         cycleLyricFontWeightPreset,
         cycleLyricBackgroundPreset,
+        toggleLyricTranslation: toggleLyricTranslationButton,
         toggleLyricDynamicTheme: toggleLyricDynamicThemeButton,
         cycleLyricThemeColor: cycleLyricThemeColorButton,
         cycleLyricTheme: cycleLyricThemeButton,
@@ -2107,6 +2521,11 @@ async function init() {
         getLyricDynamicThemeEnabled,
         getMinLyricsWidthVw: (viewportWidth) => (viewportWidth <= 767 ? MIN_LYRICS_WIDTH_VW_LOW_RES : MIN_LYRICS_WIDTH_VW),
         applyLyricsMaxWidth,
+        onWidthDragUpdate: () => {
+            const anchor = captureActiveLyricAnchor();
+            const activeIndex = captureCurrentActiveLyricIndex();
+            scheduleWheelResizeAnchorRestore(anchor, activeIndex);
+        },
         scheduleViewportSync,
         scheduleViewportSyncAndRecenter,
 
@@ -2118,6 +2537,7 @@ async function init() {
     });
     initializeLyricControlLabelHoverReset();
     initializeDynamicThemeDependentSync();
+    initTranslationToggleVisibilityObserver();
 
     // Keep dedicated /lyrics page in full-list mode (same as index expanded view).
     const lyricsContainer = document.getElementById('lyrics-container');
@@ -2140,10 +2560,15 @@ async function init() {
         if (document.hidden) return;
         refreshSongStateFromServer();
         scheduleViewportSyncAndRecenter();
+        requestAnimationFrame(() => retryLyricAssistFetchIfMissing('visibility-restore'));
     };
     document.addEventListener('visibilitychange', handleVisibilityRestore);
     window.addEventListener('focus', handleVisibilityRestore, { passive: true });
     window.addEventListener('pageshow', handleVisibilityRestore, { passive: true });
+    window.addEventListener('lyrics-ws-open', () => {
+        refreshSongStateFromServer();
+        requestAnimationFrame(() => retryLyricAssistFetchIfMissing('ws-open'));
+    });
 
     
 
@@ -2195,6 +2620,71 @@ if (document.readyState === 'loading') {
 }
 
 window.addEventListener('resize', handleWindowResize, { passive: true });
+
+async function fetchLyricsCandidateOffset(offset) {
+    const songData = state.currentSongData;
+    const videoId = typeof songData?.videoId === 'string' ? songData.videoId.trim() : '';
+    const artist = typeof songData?.artist === 'string' ? songData.artist.trim() : '';
+    const title = typeof songData?.title === 'string' ? songData.title.trim() : '';
+    if (!videoId || !artist || !title) {
+        console.warn('[LYRICS] No active song available for alternate lyric fetch');
+        return null;
+    }
+
+    const params = new URLSearchParams({
+        videoId,
+        artist,
+        title,
+        album: songData.album || '',
+        duration: String(songData.songDuration || 0),
+        offset: String(Math.max(0, Number(offset) || 0)),
+        translationExclude: getLyricTranslationExcludedLanguages().join(',')
+    });
+
+    const response = await fetch(`${API_URL}/lyrics/candidate?${params.toString()}`, {
+        cache: 'no-store'
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result?.success || !result?.data) {
+        throw new Error(result?.error || `HTTP ${response.status}`);
+    }
+
+    state.lyricsCandidateOffset = Number(result.candidateOffset || 0) || 0;
+    state.lyricsCandidateTotal = Number(result.totalCandidates || 0) || 0;
+    displayLyrics(result.data, videoId);
+    const provider = String(result.provider || result.data?.provider || 'lrclib').trim().toLowerCase() || 'lrclib';
+    console.log(`[LYRICS] Switched to synced lyric candidate ${state.lyricsCandidateOffset + 1}/${Math.max(1, state.lyricsCandidateTotal)} from ${provider} (cache overwritten)`);
+    return result;
+}
+
+window.swapLyricsCandidate = async function() {
+    const currentOffset = Number(state.lyricsCandidateOffset || 0) || 0;
+    const total = Number(state.lyricsCandidateTotal || 0) || 0;
+    const nextOffset = total > 0 ? ((currentOffset + 1) % total) : (currentOffset + 1);
+    return fetchLyricsCandidateOffset(nextOffset);
+};
+
+window.getLyricTranslationExcludedLanguages = function() {
+    return getLyricTranslationExcludedLanguages();
+};
+
+window.setLyricTranslationExcludedLanguages = function(languages) {
+    return setLyricTranslationExcludedLanguages(languages);
+};
+
+window.toggleLyricTranslationExcludedLanguage = function(languageCode) {
+    return toggleLyricTranslationExcludedLanguage(languageCode);
+};
+
+window.toggleLyricTranslationExclude = window.toggleLyricTranslationExcludedLanguage;
+
+window.getCurrentLyricTranslationLanguageInfo = function() {
+    return state.currentSongData?.lyricsTranslationLanguage || null;
+};
+
+window.getLyricDetectedLanguage = function() {
+    return String(state.currentSongData?.lyricsTranslationLanguage?.detectedLanguage || '').trim().toLowerCase();
+};
 
 // Toggle function to manually hide/show layout (callable from external app)
 window.togglePause = function() {

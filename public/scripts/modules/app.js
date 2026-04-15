@@ -1,4 +1,4 @@
-import { YT_API_KEY } from './config.js';
+import { YT_API_KEY, RAPIDAPI_HOST, RAPIDAPI_KEY, hasUsableYouTubeApiKey, hasUsableRapidApiKey } from './config.js';
 import { getThumbnailUrl } from './connection.js';
 import { logMessage } from './utils.js';
 import { addToQueue } from './queue.js';
@@ -17,8 +17,8 @@ export async function searchYouTubeMusic(query) {
         const response = await fetch(`https://youtube-music-api3.p.rapidapi.com/search?q=${encodeURIComponent(query)}&type=song`, {
             method: 'GET',
             headers: {
-                'x-rapidapi-host': 'youtube-music-api3.p.rapidapi.com',
-                'x-rapidapi-key': '6e9c0a131fmshb2c000221e56a88p1505d8jsn8afc28ef47a5'
+                'x-rapidapi-host': RAPIDAPI_HOST,
+                'x-rapidapi-key': RAPIDAPI_KEY
             }
         });
 
@@ -134,7 +134,7 @@ export async function searchYouTubeVideos(query) {
         // ------------------------
         // 1) YouTube Data API v3
         // ------------------------
-        const hasKey = Boolean(YT_API_KEY) && !/YOUR_|REPLACE|CHANGEME/i.test(String(YT_API_KEY));
+        const hasKey = hasUsableYouTubeApiKey();
         if (hasKey) {
             const url = new URL('https://www.googleapis.com/youtube/v3/search');
             url.searchParams.set('part', 'snippet');
@@ -166,8 +166,8 @@ export async function searchYouTubeVideos(query) {
             }
 
             console.warn('[VIDEO] YouTube Data API failed, falling back:', response.status, apiMsg);
-        } else {
-            console.warn('[VIDEO] Missing/placeholder YT_API_KEY; using fallback search.');
+        } else if (!hasUsableRapidApiKey()) {
+            console.warn('[VIDEO] Missing/placeholder YT_API_KEY and RAPIDAPI_KEY.');
         }
 
         // ------------------------
@@ -176,8 +176,8 @@ export async function searchYouTubeVideos(query) {
         const rapidResponse = await fetch(`https://youtube-music-api3.p.rapidapi.com/search?q=${encodeURIComponent(query)}&type=video`, {
             method: 'GET',
             headers: {
-                'x-rapidapi-host': 'youtube-music-api3.p.rapidapi.com',
-                'x-rapidapi-key': '6e9c0a131fmshb2c000221e56a88p1505d8jsn8afc28ef47a5'
+                'x-rapidapi-host': RAPIDAPI_HOST,
+                'x-rapidapi-key': RAPIDAPI_KEY
             }
         });
 

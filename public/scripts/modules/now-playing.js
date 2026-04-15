@@ -3,24 +3,8 @@ import { getThumbnailUrl } from './connection.js';
 import { fetchLyrics, updateLyricsDisplay } from './lyric.js';
 import { refreshLyricDynamicTheme } from './lyric-dynamic-theme.js';
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-const SONG_INFO_REVEAL_ANIMATION_MS = 1000;
-const SONG_INFO_SWAP_OUT_MS = 260;
 const FALLBACK_ALBUM_COVER_SRC = '/icons/album-cover-placeholder.png';
 const LOCAL_PROGRESS_INTERVAL_MS = 250;
-
-// ---------------------------------------------------------------------------
-// Song-info animation state
-// ---------------------------------------------------------------------------
-let songInfoSwapTimer = null;
-let songInfoRevealTimer = null;
-let songInfoVisibilityFailSafeTimer = null;
-let songInfoLaunchRecoveryTimer = null;
-let pendingSongInfoRevealToken = 0;
-let lyricsSongInfoUpdateToken = 0;
-let pendingSongInfoContentKey = '';
 
 
 // ---------------------------------------------------------------------------
@@ -44,134 +28,134 @@ function resolveDisplayCoverSrc(imageSrc) {
 function applyCoverImage(cover, imageSrc) {
     if (!cover) return;
     const resolvedSrc = (imageSrc || '').toString().trim() || FALLBACK_ALBUM_COVER_SRC;
-    cover.onerror = () => {
-        cover.onerror = null;
-        cover.src = FALLBACK_ALBUM_COVER_SRC;
-        cover.dataset.appliedImageSrc = FALLBACK_ALBUM_COVER_SRC;
+    const currentSrc = (cover.dataset.appliedImageSrc || '').trim();
+    if (currentSrc === resolvedSrc) return;
+
+    const pendingToken = `${Date.now()}-${Math.random()}`;
+    cover.dataset.pendingImageSrc = resolvedSrc;
+    cover.dataset.pendingImageToken = pendingToken;
+    const shouldRevealActualCover =
+        currentSrc === FALLBACK_ALBUM_COVER_SRC &&
+        resolvedSrc !== FALLBACK_ALBUM_COVER_SRC;
+
+    const commitImage = (nextSrc, expectedToken = pendingToken) => {
+        if (cover.dataset.pendingImageToken !== expectedToken) return;
+        cover.onerror = () => {
+            cover.onerror = null;
+            cover.src = FALLBACK_ALBUM_COVER_SRC;
+            cover.dataset.appliedImageSrc = FALLBACK_ALBUM_COVER_SRC;
+        };
+        cover.src = nextSrc;
+        cover.dataset.appliedImageSrc = nextSrc;
+        delete cover.dataset.pendingImageSrc;
+        delete cover.dataset.pendingImageToken;
+        if (shouldRevealActualCover && nextSrc !== FALLBACK_ALBUM_COVER_SRC && typeof cover.animate === 'function') {
+            if (typeof cover.getAnimations === 'function') {
+                cover.getAnimations().forEach((animation) => animation.cancel());
+            }
+            cover.animate(
+                [
+                    { opacity: 0.18 },
+                    { opacity: 1 }
+                ],
+                {
+                    duration: 500,
+                    easing: 'ease-out'
+                }
+            );
+        }
     };
-    cover.src = resolvedSrc;
-    cover.dataset.appliedImageSrc = resolvedSrc;
+
+    if (resolvedSrc === FALLBACK_ALBUM_COVER_SRC) {
+        commitImage(resolvedSrc);
+        return;
+    }
+
+    const preloader = new Image();
+    preloader.onload = () => commitImage(resolvedSrc);
+    preloader.onerror = () => commitImage(FALLBACK_ALBUM_COVER_SRC);
+    preloader.src = resolvedSrc;
 }
 
-// ---------------------------------------------------------------------------
-// Song-info UI animation helpers
-// ---------------------------------------------------------------------------
-function cancelSongInfoSwapTimer() {
-    if (songInfoSwapTimer) { clearTimeout(songInfoSwapTimer); songInfoSwapTimer = null; }
-}
-function cancelSongInfoRevealTimer() {
-    if (songInfoRevealTimer) { clearTimeout(songInfoRevealTimer); songInfoRevealTimer = null; }
-}
-function cancelSongInfoVisibilityFailSafeTimer() {
-    if (songInfoVisibilityFailSafeTimer) { clearTimeout(songInfoVisibilityFailSafeTimer); songInfoVisibilityFailSafeTimer = null; }
-}
-function cancelSongInfoLaunchRecoveryTimer() {
-    if (songInfoLaunchRecoveryTimer) { clearTimeout(songInfoLaunchRecoveryTimer); songInfoLaunchRecoveryTimer = null; }
-}
-function clearPendingSongInfoReveal() {
-    pendingSongInfoRevealToken = 0;
-    window.__lyricsSongInfoRevealPendingUntil = 0;
-}
-
-function buildSongInfoContentKey(title, artist, thumbnailUrl) {
+function buildSongInfoContentKey(title, artist) {
     return JSON.stringify([
         (title || '').toString(),
-        (artist || '').toString(),
-        (thumbnailUrl || '').toString().trim()
+        (artist || '').toString()
     ]);
 }
 
-
-function replaySongInfoReveal(songInfo, songInfoContent) {
-    if (!songInfo || !songInfoContent) return;
-    songInfo.classList.add('loaded');
-    songInfo.classList.remove('no-transition');
-    songInfoContent.classList.remove('transitioning-out', 'transitioning');
-    songInfoContent.classList.remove('reveal-up');
-    void songInfoContent.offsetHeight;
-    songInfoContent.classList.add('reveal-up');
+function hasSongInfoTextContent(songInfoContent) {
+    return ((songInfoContent?.textContent) || '').trim().length > 0;
 }
 
-function scheduleSongInfoVisibilityFailSafe(songInfo, songInfoContent, updateToken, delayMs = 600) {
-    if (!songInfo || !songInfoContent) return;
-    cancelSongInfoVisibilityFailSafeTimer();
-    songInfoVisibilityFailSafeTimer = setTimeout(() => {
-        if (updateToken !== lyricsSongInfoUpdateToken) return;
-        songInfo.classList.add('loaded');
-        replaySongInfoReveal(songInfo, songInfoContent);
-        pendingSongInfoRevealToken = 0;
-        songInfoVisibilityFailSafeTimer = null;
-    }, Math.max(0, Number(delayMs) || 0));
+function normalizeSongText(value) {
+    return typeof value === 'string' ? value.trim() : '';
 }
 
-function scheduleSongInfoReveal(songInfo, songInfoContent, delayMs = 0) {
-    if (!songInfo || !songInfoContent) return;
-    cancelSongInfoRevealTimer();
-    cancelSongInfoVisibilityFailSafeTimer();
-    window.__lyricsSongInfoRevealPendingUntil = Date.now() + Math.max(0, Number(delayMs) || 0) + SONG_INFO_REVEAL_ANIMATION_MS;
-    songInfoRevealTimer = setTimeout(() => {
-        songInfoContent.classList.remove('transitioning-out', 'transitioning');
-        replaySongInfoReveal(songInfo, songInfoContent);
-        songInfoRevealTimer = null;
-    }, Math.max(0, Number(delayMs) || 0));
+function buildLyricsRequestKey(songData) {
+    if (!songData || !songData.videoId) return '';
+    return JSON.stringify([
+        String(songData.videoId).trim(),
+        normalizeSongText(songData.artist),
+        normalizeSongText(songData.title),
+        String(songData.album || '').trim(),
+        Number(songData.songDuration || 0) || 0
+    ]);
 }
 
-function markSongInfoRevealPending(songInfo, songInfoContent, updateToken) {
-    if (!songInfo || !songInfoContent) return;
-    pendingSongInfoRevealToken = updateToken;
-    songInfoContent.classList.remove('reveal-up');
-    songInfoContent.classList.remove('transitioning-out');
-    songInfoContent.classList.add('transitioning');
-    scheduleSongInfoVisibilityFailSafe(songInfo, songInfoContent, updateToken);
+function requestLyricsIfReady(songData, onLyricsDisplay, onLyricsHide) {
+    const videoId = typeof songData?.videoId === 'string' ? songData.videoId.trim() : '';
+    const artist = normalizeSongText(songData?.artist);
+    const title = normalizeSongText(songData?.title);
+    if (!videoId || !artist || !title) return false;
+
+    const requestKey = buildLyricsRequestKey(songData);
+    const hasLyricsForCurrentSong =
+        state.currentVideoId === videoId &&
+        state.lastFetchedVideoId === videoId &&
+        Array.isArray(state.currentLyrics) &&
+        state.currentLyrics.length > 0;
+
+    if (hasLyricsForCurrentSong) return false;
+    if (state.currentFetchVideoId === videoId) return false;
+    if (state.lastLyricsRequestKey === requestKey) return false;
+
+    state.lastLyricsRequestKey = requestKey;
+    fetchLyrics(
+        artist,
+        title,
+        songData.album || '',
+        songData.songDuration || 0,
+        onLyricsDisplay,
+        onLyricsHide
+    );
+    return true;
 }
 
-export function settleLyricsSongInfoReveal() {
-    if (!pendingSongInfoRevealToken) return;
-    if (pendingSongInfoRevealToken !== lyricsSongInfoUpdateToken) {
-        clearPendingSongInfoReveal();
-        return;
+function playSongInfoFadeIn(songInfoContent) {
+    if (!songInfoContent || typeof songInfoContent.animate !== 'function') return;
+    if (typeof songInfoContent.getAnimations === 'function') {
+        songInfoContent.getAnimations().forEach((animation) => animation.cancel());
     }
-    const songInfo = document.getElementById('song-info');
-    const songInfoContent = document.getElementById('song-info-content');
-    if (!songInfo || !songInfoContent) { clearPendingSongInfoReveal(); return; }
-    scheduleSongInfoReveal(songInfo, songInfoContent);
-    clearPendingSongInfoReveal();
-}
-
-export function getRemainingSongInfoRevealMs() {
-    const pendingUntil = Number(window.__lyricsSongInfoRevealPendingUntil || 0);
-    if (!Number.isFinite(pendingUntil) || pendingUntil <= 0) return 0;
-    return Math.max(0, pendingUntil - Date.now());
+    songInfoContent.animate(
+        [
+            { opacity: 0.2 },
+            { opacity: 1 }
+        ],
+        {
+            duration: 220,
+            easing: 'ease-out'
+        }
+    );
 }
 
 export function ensureLyricsSongInfoVisible() {
     const songInfo = document.getElementById('song-info');
-    const songInfoContent = document.getElementById('song-info-content');
-    if (!songInfo || !songInfoContent) return;
+    if (!songInfo) return;
     if (document.body.classList.contains('no-song-playing')) return;
-    const hasContent = (songInfoContent.textContent || '').trim().length > 0;
-    if (!songInfo.classList.contains('loaded') && !hasContent) return;
-
-    const isStuckHidden =
-        !songInfo.classList.contains('loaded') ||
-        songInfoContent.classList.contains('transitioning') ||
-        songInfoContent.classList.contains('transitioning-out') ||
-        !songInfoContent.classList.contains('reveal-up');
-
-    if (isStuckHidden) {
-        cancelSongInfoRevealTimer();
-        cancelSongInfoVisibilityFailSafeTimer();
-        replaySongInfoReveal(songInfo, songInfoContent);
-        clearPendingSongInfoReveal();
-    }
-}
-
-function scheduleSongInfoLaunchRecovery() {
-    cancelSongInfoLaunchRecoveryTimer();
-    songInfoLaunchRecoveryTimer = setTimeout(() => {
-        songInfoLaunchRecoveryTimer = null;
-        ensureLyricsSongInfoVisible();
-    }, 900);
+    const songInfoContent = document.getElementById('song-info-content');
+    if (!hasSongInfoTextContent(songInfoContent)) return;
+    songInfo.classList.add('loaded');
 }
 
 function replayAmbientBgReveal(ambientBg) {
@@ -258,24 +242,16 @@ function startProgressTracking(songData) {
 // Now-playing UI (shared)
 // ---------------------------------------------------------------------------
 export function updateNowPlayingUI(data, options = {}) {
-    const { animate = false, isMainApp = false, trustedTiming = false } = options;
+    const { isMainApp = false, trustedTiming = false } = options;
+    const hasVideoId = typeof data?.videoId === 'string' && data.videoId.trim().length > 0;
 
-    if (!data || !data.title || !data.artist) {
+    if (!data || !hasVideoId) {
         document.body.classList.add('no-song-playing');
         const songInfo = document.getElementById(isMainApp ? 'nowplaying' : 'song-info');
-        const songInfoContent = document.getElementById('song-info-content');
         if (songInfo) {
             if (isMainApp) {
                 songInfo.style.display = 'none';
             } else {
-                cancelSongInfoSwapTimer();
-                if (songInfoContent) {
-                    songInfoContent.classList.remove('transitioning-out', 'transitioning', 'reveal-up');
-                }
-                cancelSongInfoRevealTimer();
-                cancelSongInfoVisibilityFailSafeTimer();
-                clearPendingSongInfoReveal();
-                pendingSongInfoContentKey = '';
                 delete songInfo.dataset.contentKey;
                 songInfo.classList.remove('loaded');
             }
@@ -283,12 +259,24 @@ export function updateNowPlayingUI(data, options = {}) {
         return;
     }
 
+    if (!data.title || !data.artist) {
+        document.body.classList.remove('no-song-playing');
+        if (!isMainApp) {
+            const songInfo = document.getElementById('song-info');
+            const songInfoContent = document.getElementById('song-info-content');
+            if (songInfo && hasSongInfoTextContent(songInfoContent)) {
+                songInfo.classList.add('loaded');
+                state.isPaused = data.isPaused;
+                return;
+            }
+        }
+    }
+
     const thumbnailUrl = resolveDisplayCoverSrc(data.imageSrc);
     if (isMainApp) {
         updateMainAppUI(data, thumbnailUrl);
     } else {
-        updateLyricsAppUI(data, thumbnailUrl, animate);
-        scheduleSongInfoLaunchRecovery();
+        updateLyricsAppUI(data, thumbnailUrl);
     }
 
     state.isPaused = data.isPaused;
@@ -324,24 +312,23 @@ function updateMainAppUI(data, thumbnailUrl) {
     if (rightPlayPauseIcon) rightPlayPauseIcon.textContent = data.isPaused ? 'play_arrow' : 'pause';
 }
 
-function updateLyricsAppUI(data, thumbnailUrl, animate) {
+function updateLyricsAppUI(data, thumbnailUrl) {
     const songInfo = document.getElementById('song-info');
     const songInfoContent = document.getElementById('song-info-content');
     const titleEl = document.getElementById('song-info-title');
     const artistEl = document.getElementById('song-info-artist');
     const cover = document.getElementById('song-info-cover');
     const ambientBg = document.getElementById('ambient-bg');
-    if (!songInfo || !titleEl || !artistEl || !cover) return;
+    if (!songInfo || !songInfoContent || !titleEl || !artistEl || !cover) return;
 
     const nextThumbnailUrl = (thumbnailUrl || '').toString().trim();
     const currentAppliedThumbnailUrl = (cover.dataset.appliedImageSrc || '').trim();
     const currentAmbientThumbnailUrl = (ambientBg?.dataset.appliedImageSrc || '').trim();
-    const updateToken = ++lyricsSongInfoUpdateToken;
-    const isFirstLoad = !songInfo.classList.contains('loaded');
-    const nextContentKey = buildSongInfoContentKey(data.title, data.artist, nextThumbnailUrl);
+    const wasLoaded = songInfo.classList.contains('loaded');
+    const nextContentKey = buildSongInfoContentKey(data.title, data.artist);
     const currentContentKey =
         songInfo.dataset.contentKey ||
-        buildSongInfoContentKey(titleEl.textContent, artistEl.textContent, currentAppliedThumbnailUrl);
+        buildSongInfoContentKey(titleEl.textContent, artistEl.textContent);
 
     if (ambientBg) {
         if (currentAmbientThumbnailUrl !== nextThumbnailUrl) {
@@ -354,59 +341,20 @@ function updateLyricsAppUI(data, thumbnailUrl, animate) {
         }
     }
 
-    const contentChanged =
-        currentContentKey !== nextContentKey;
-    const shouldAnimate = contentChanged && animate && !isFirstLoad;
-    const isAnimatingSameTarget =
-        pendingSongInfoContentKey === nextContentKey &&
-        (
-            !!songInfoSwapTimer ||
-            pendingSongInfoRevealToken === updateToken - 1 ||
-            songInfoContent?.classList.contains('transitioning') ||
-            songInfoContent?.classList.contains('transitioning-out')
-        );
-
-    if (isAnimatingSameTarget) {
-        if (!window.manuallyPaused) {
-            document.body.classList.toggle('paused', !!data.isPaused);
-        }
-        return;
-    }
-
-    cancelSongInfoSwapTimer();
-    cancelSongInfoRevealTimer();
-    cancelSongInfoVisibilityFailSafeTimer();
-    clearPendingSongInfoReveal();
-    if (songInfoContent) {
-        songInfoContent.classList.remove('transitioning-out', 'transitioning', 'reveal-up');
-    }
-
-    if (shouldAnimate && songInfoContent) {
-        pendingSongInfoContentKey = nextContentKey;
-        songInfo.classList.add('loaded');
-        songInfoContent.classList.add('transitioning-out');
-        songInfoSwapTimer = setTimeout(() => {
-            if (updateToken !== lyricsSongInfoUpdateToken) return;
-            markSongInfoRevealPending(songInfo, songInfoContent, updateToken);
-            titleEl.textContent = data.title;
-            artistEl.textContent = data.artist;
-            applyCoverImage(cover, nextThumbnailUrl);
-            songInfo.dataset.contentKey = nextContentKey;
-            refreshLyricDynamicTheme({ imageSrc: nextThumbnailUrl });
-            songInfoSwapTimer = null;
-        }, SONG_INFO_SWAP_OUT_MS);
-    } else {
-        pendingSongInfoContentKey = '';
+    const contentChanged = currentContentKey !== nextContentKey;
+    if (contentChanged) {
         titleEl.textContent = data.title;
         artistEl.textContent = data.artist;
         applyCoverImage(cover, nextThumbnailUrl);
         songInfo.dataset.contentKey = nextContentKey;
         refreshLyricDynamicTheme({ imageSrc: nextThumbnailUrl });
-        if (isFirstLoad || animate || !songInfo.classList.contains('loaded')) {
-            markSongInfoRevealPending(songInfo, songInfoContent, updateToken);
-        } else {
-            songInfo.classList.add('loaded');
-        }
+    } else if (currentAppliedThumbnailUrl !== nextThumbnailUrl) {
+        applyCoverImage(cover, nextThumbnailUrl);
+    }
+
+    songInfo.classList.add('loaded');
+    if (wasLoaded && contentChanged) {
+        playSongInfoFadeIn(songInfoContent);
     }
 
     if (!window.manuallyPaused) {
@@ -441,21 +389,22 @@ export async function updateNowPlayingFromData(data, handlers = {}) {
     const hasElapsed = Number.isFinite(Number(data.elapsedSeconds));
     const incomingElapsed = hasElapsed ? Number(data.elapsedSeconds) : null;
 
+    const previousSongData = songChanged ? null : state.currentSongData;
     const displayData = {
-        ...state.currentSongData,
+        ...(previousSongData || {}),
         ...data,
         title: Object.prototype.hasOwnProperty.call(data, 'title')
-            ? (data.title || '')
-            : (state.currentSongData?.title || ''),
+            ? (normalizeSongText(data.title) || (previousSongData?.title || ''))
+            : (previousSongData?.title || ''),
         artist: Object.prototype.hasOwnProperty.call(data, 'artist')
-            ? (data.artist || '')
-            : (state.currentSongData?.artist || ''),
+            ? (normalizeSongText(data.artist) || (previousSongData?.artist || ''))
+            : (previousSongData?.artist || ''),
         imageSrc: Object.prototype.hasOwnProperty.call(data, 'imageSrc')
             ? (data.imageSrc || '')
-            : ((!songChanged ? state.currentSongData?.imageSrc : '') || ''),
+            : (previousSongData?.imageSrc || ''),
         album: Object.prototype.hasOwnProperty.call(data, 'album')
             ? (data.album || '')
-            : (state.currentSongData?.album || '')
+            : (previousSongData?.album || '')
     };
 
     if (songChanged) {
@@ -477,34 +426,13 @@ export async function updateNowPlayingFromData(data, handlers = {}) {
         if (plainEl) { plainEl.innerHTML = ''; plainEl.style.display = 'none'; }
         if (loadingEl) { loadingEl.style.display = ''; loadingEl.classList.add('active'); }
 
-        if (displayData.artist && displayData.title) {
-            fetchLyrics(
-                displayData.artist,
-                displayData.title,
-                displayData.album || '',
-                displayData.songDuration || 0,
-                onLyricsDisplay,
-                onLyricsHide
-            );
-        } else if (loadingEl) {
+        if (!requestLyricsIfReady(displayData, onLyricsDisplay, onLyricsHide) && loadingEl) {
             loadingEl.classList.remove('active');
         }
     } else if (
-        data.videoId &&
-        data.videoId !== state.lastFetchedVideoId &&
-        data.videoId !== state.currentFetchVideoId &&
-        displayData.artist &&
-        displayData.title
+        requestLyricsIfReady(displayData, onLyricsDisplay, onLyricsHide)
     ) {
         console.log('[LYRICS] Fetching lyrics for current song (mid-song load)');
-        fetchLyrics(
-            displayData.artist,
-            displayData.title,
-            displayData.album || '',
-            displayData.songDuration || 0,
-            onLyricsDisplay,
-            onLyricsHide
-        );
     } else if (incomingElapsed !== null) {
         syncPlaybackAnchor(data, nowMs);
     }
@@ -521,7 +449,6 @@ export async function updateNowPlayingFromData(data, handlers = {}) {
     }
 
     updateNowPlayingUI(displayData, {
-        animate: songChanged,
         isMainApp,
         trustedTiming: incomingElapsed !== null
     });

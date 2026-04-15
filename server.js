@@ -49,7 +49,8 @@ const {
 } = require('./lib/websocket');
 const {
     loadLyricsCacheFromDisk,
-    fetchLyrics
+    fetchLyrics,
+    fetchLyricsCandidate
 } = require('./lib/lyrics');
 const { fetchImage } = require('./lib/image-proxy');
 // Floating Lyrics process detection/control is handled server-side (local machine).
@@ -89,6 +90,7 @@ setupRoutes(app, {
     getLastVolume,
     setLastVolume,
     fetchLyrics,
+    fetchLyricsCandidate,
     fetchImage,
     QUEUE_CACHE_TTL,
     VIDEO_ID_IP_MAP_MAX_SIZE
