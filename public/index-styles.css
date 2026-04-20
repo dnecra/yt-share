@@ -451,25 +451,8 @@
             border-radius: 16px;
             box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5);
             z-index: 1003;
-            border: 1px solid var(--primary-color);
+            border: 1px solid var(--text-primary);
             position: relative;
-            animation: borderPulse 1s 20;
-            box-shadow: 0 0 15px rgba(253, 2, 52, 0.3);
-        }
-
-        @keyframes borderPulse {
-            0% {
-                border-color: var(--primary-color);
-                box-shadow: 0 0 0 0 rgba(253, 2, 52, 0.4);
-            }
-            50% {
-                border-color: rgba(253, 2, 52, 0.5);
-                box-shadow: 0 0 0 4px rgba(253, 2, 52, 0);
-            }
-            100% {
-                border-color: var(--primary-color);
-                box-shadow: 0 0 0 0 rgba(253, 2, 52, 0.4);
-            }
         }
 
 
@@ -491,8 +474,8 @@
         }
 
         #search-bar button {
-            background-color: var(--primary-color);
-            color: var(--text-primary);
+            background-color: var(--text-primary);
+            color: var(--bg-dark);
             border: none;
             padding: 12px;
             border-radius: 12px;
@@ -508,7 +491,7 @@
         }
 
         #search-bar button:hover {
-            background-color: #ff1744;
+            background-color: rgba(255, 255, 255, 0.88);
             transform: translateY(-1px);
         }
 
@@ -1444,18 +1427,18 @@
         }
         .top-action-btn.streaming {
             animation: buttonPulse 1.5s ease-in-out infinite;
-            background: rgba(253, 2, 52, 0.1);
-            border-color: var(--primary-color);
+            background: color-mix(in srgb, var(--lyrics-active-color, var(--text-primary)) 10%, transparent);
+            border-color: var(--lyrics-active-color, var(--text-primary));
         }
         .top-action-btn.active {
-            background: rgba(253, 2, 52, 0.12);
-            border-color: var(--primary-color);
-            box-shadow: 0 2px 20px rgba(253, 2, 52, 0.28);
+            background: color-mix(in srgb, var(--lyrics-active-color, var(--text-primary)) 12%, transparent);
+            border-color: var(--lyrics-active-color, var(--text-primary));
+            box-shadow: 0 2px 20px color-mix(in srgb, var(--lyrics-active-color, var(--text-primary)) 28%, transparent);
         }
         @keyframes buttonPulse {
-            0%   { box-shadow: 0 2px 10px rgba(253, 2, 52, 0.12); }
-            50%  { box-shadow: 0 2px 20px rgba(253, 2, 52, 0.35); }
-            100% { box-shadow: 0 2px 10px rgba(253, 2, 52, 0.12); }
+            0%   { box-shadow: 0 2px 10px color-mix(in srgb, var(--lyrics-active-color, var(--text-primary)) 14%, transparent); }
+            50%  { box-shadow: 0 2px 20px color-mix(in srgb, var(--lyrics-active-color, var(--text-primary)) 32%, transparent); }
+            100% { box-shadow: 0 2px 10px color-mix(in srgb, var(--lyrics-active-color, var(--text-primary)) 14%, transparent); }
         }
         .top-action-btn.left {
             border-radius: 25px 0 0 25px;
