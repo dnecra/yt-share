@@ -628,6 +628,13 @@ let bufferLength = null;
 let animationId = null;
 let isVisualizerActive = false;
 
+function getCurrentTopButtonGlowColor() {
+    const rootStyles = getComputedStyle(document.documentElement);
+    return rootStyles.getPropertyValue('--lyrics-active-color').trim()
+        || rootStyles.getPropertyValue('--text-primary').trim()
+        || '#ffffff';
+}
+
 function showVisualizer() {
     const visualizerContainer = document.getElementById('audio-visualizer');
     if (visualizerContainer) {
@@ -646,7 +653,7 @@ function updateStatus(message, isError = false) {
     const statusDiv = document.getElementById('visualizer-status');
     if (statusDiv) {
         statusDiv.textContent = message;
-        statusDiv.style.color = isError ? 'rgba(253,2,52,1)' : 'rgba(253,2,52,1)';
+        statusDiv.style.color = getCurrentTopButtonGlowColor();
     }
     console.log(`[STREAM] ${message}`);
 }
@@ -698,6 +705,11 @@ function drawVisualizer() {
     if (!canvas) return;
     
     const ctx = canvas.getContext('2d');
+    const accentColor = getCurrentTopButtonGlowColor();
+    const statusDiv = document.getElementById('visualizer-status');
+    if (statusDiv) {
+        statusDiv.style.color = accentColor;
+    }
     
     analyser.getByteFrequencyData(dataArray);
 
@@ -716,7 +728,7 @@ function drawVisualizer() {
         const x = i * barWidth;
         const y = canvas.height - barHeight;
         
-        ctx.fillStyle = 'rgba(253,2,52,1)';
+        ctx.fillStyle = accentColor;
         ctx.fillRect(x, y, barWidth - 1, barHeight);
     }
 }
@@ -907,7 +919,7 @@ function startAutoReconnect(audioPlayer, toggleBtn) {
         audioPlayer._syncInterval = null;
     }
     
-    const streamUrl = `/audio-proxy?url=${encodeURIComponent('http://192.168.0.101:5901/stream/swyh.wav')}`;
+    const streamUrl = `/audio-proxy?url=${encodeURIComponent('http://192.168.99.47:5901/stream/swyh.wav')}`;
     
     function attemptReconnect() {
         if (!isStreamPlaying) {

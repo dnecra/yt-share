@@ -1,5 +1,5 @@
 import { state } from './config.js';
-import { previousTrack, nextTrack, togglePlay, toggleMute, updateVolume, updateVolumeUI } from './navigation.js';
+import { previousTrack, nextTrack, togglePlay, updateVolume, updateVolumeUI } from './navigation.js';
 import { logMessage, formatTime } from './utils.js';
 
 // WebSocket message handler moved from main.js
@@ -193,31 +193,33 @@ export function isPopoutMode() {
     return window.location.search.includes('popout=1');
 }
 
+function applyMobileSectionState() {
+    if (window.innerWidth > 768) {
+        document.body.classList.remove('show-left-section');
+        state.mobileSection = 'right';
+        return;
+    }
+
+    document.body.classList.toggle('show-left-section', state.mobileSection === 'left');
+}
+
 // Mobile section toggle
 export function toggleMobileSection() {
     if (window.innerWidth > 768) return;
 
     if (state.mobileSection === 'right') {
-        document.body.classList.add('show-left-section');
         state.mobileSection = 'left';
     } else {
-        document.body.classList.remove('show-left-section');
         state.mobileSection = 'right';
     }
 
+    applyMobileSectionState();
     updatePopoutToggleBtn();
 }
 
 export function updatePopoutToggleBtn() {
     const btn = document.getElementById('popout-toggle-btn');
-    if (!btn) return;
-
-    if (window.innerWidth <= 768 || isPopoutMode()) {
-        btn.style.display = 'flex';
-        btn.querySelector('.material-icons').textContent = (state.mobileSection === 'right') ? 'queue_music' : 'list';
-    } else {
-        btn.style.display = 'none';
-    }
+    if (btn) btn.style.display = 'none';
 }
 
 // Search UI
@@ -370,11 +372,6 @@ export function initCursorTracking() {
 export function initResizeHandler() {
     let floatingSearchHomeParent = null;
     let floatingSearchHomeNextSibling = null;
-    let streamBtnHomeParent = null;
-    let streamBtnHomeNextSibling = null;
-    let volumeControlHomeParent = null;
-    let volumeControlHomeNextSibling = null;
-    let volumeFabInitialized = false;
 
     const applyMobileSearchPlacement = () => {
         const floatingSearch = document.getElementById('floating-search');
@@ -409,144 +406,12 @@ export function initResizeHandler() {
         document.body.classList.remove('search-on-left');
     };
 
-    const applyMobileStreamButtonPlacement = () => {
-        const streamBtn = document.getElementById('stream-btn');
-        const bottomControls = document.getElementById('bottom-controls');
-        if (!streamBtn || !bottomControls) return;
-
-        if (!streamBtnHomeParent) {
-            streamBtnHomeParent = streamBtn.parentElement;
-            streamBtnHomeNextSibling = streamBtn.nextElementSibling;
-        }
-
-        const isMobile = window.innerWidth <= 768;
-
-        if (isMobile) {
-            if (streamBtn.parentElement !== bottomControls) {
-                bottomControls.appendChild(streamBtn);
-            }
-            streamBtn.classList.add('mobile-bottom-stream');
-            return;
-        }
-
-        streamBtn.classList.remove('mobile-bottom-stream');
-        if (streamBtnHomeParent && streamBtn.parentElement !== streamBtnHomeParent) {
-            if (streamBtnHomeNextSibling && streamBtnHomeNextSibling.parentElement === streamBtnHomeParent) {
-                streamBtnHomeParent.insertBefore(streamBtn, streamBtnHomeNextSibling);
-            } else {
-                streamBtnHomeParent.appendChild(streamBtn);
-            }
-        }
-    };
-
-    const applyMobileVolumePlacement = () => {
-        const volumeControl = document.querySelector('.volume-control');
-        const bottomControls = document.getElementById('bottom-controls');
-        if (!volumeControl || !bottomControls) return;
-
-        if (!volumeControlHomeParent) {
-            volumeControlHomeParent = volumeControl.parentElement;
-            volumeControlHomeNextSibling = volumeControl.nextElementSibling;
-        }
-
-        const isMobile = window.innerWidth <= 768;
-        if (isMobile) {
-            if (volumeControl.parentElement !== document.body) {
-                document.body.appendChild(volumeControl);
-            }
-            volumeControl.classList.add('mobile-volume-floating');
-            return;
-        }
-
-        volumeControl.classList.remove('mobile-volume-floating');
-        if (volumeControlHomeParent && volumeControl.parentElement !== volumeControlHomeParent) {
-            if (volumeControlHomeNextSibling && volumeControlHomeNextSibling.parentElement === volumeControlHomeParent) {
-                volumeControlHomeParent.insertBefore(volumeControl, volumeControlHomeNextSibling);
-            } else {
-                volumeControlHomeParent.appendChild(volumeControl);
-            }
-        }
-    };
-
-    const initMobileVolumeFab = () => {
-        if (volumeFabInitialized) return;
-
-        const volumeControl = document.querySelector('.volume-control');
-        const volumeButton = document.querySelector('.volume-control .volume-icon-button');
-        const volumeSlider = document.querySelector('.volume-control .volume-slider');
-        if (!volumeControl || !volumeButton || !volumeSlider) return;
-
-        if (!volumeButton.dataset.desktopOnclick) {
-            volumeButton.dataset.desktopOnclick = volumeButton.getAttribute('onclick') || 'toggleMute()';
-        }
-        if (volumeButton.getAttribute('onclick')) {
-            volumeButton.removeAttribute('onclick');
-        }
-
-        const setAdjusting = (active) => {
-            if (window.innerWidth <= 768) {
-                document.body.classList.toggle('mobile-volume-adjusting', !!active);
-                return;
-            }
-            document.body.classList.remove('mobile-volume-adjusting');
-        };
-        const syncMobileVolumeIconState = () => {
-            const value = parseInt(volumeSlider.value, 10);
-            const safe = Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
-            volumeControl.classList.remove('volume-muted', 'volume-half', 'volume-max');
-            if (safe <= 0) {
-                volumeControl.classList.add('volume-muted');
-            } else if (safe <= 50) {
-                volumeControl.classList.add('volume-half');
-            } else {
-                volumeControl.classList.add('volume-max');
-            }
-        };
-
-        const beginAdjust = () => setAdjusting(true);
-        const endAdjust = () => setTimeout(() => setAdjusting(false), 80);
-
-        volumeSlider.addEventListener('pointerdown', beginAdjust);
-        volumeSlider.addEventListener('mousedown', beginAdjust);
-        volumeSlider.addEventListener('touchstart', beginAdjust, { passive: true });
-        volumeSlider.addEventListener('focus', beginAdjust);
-        volumeSlider.addEventListener('keydown', beginAdjust);
-
-        window.addEventListener('pointerup', endAdjust, { passive: true });
-        window.addEventListener('mouseup', endAdjust, { passive: true });
-        window.addEventListener('touchend', endAdjust, { passive: true });
-        window.addEventListener('touchcancel', endAdjust, { passive: true });
-        volumeSlider.addEventListener('blur', endAdjust);
-        volumeSlider.addEventListener('keyup', endAdjust);
-        window.addEventListener('blur', () => setAdjusting(false));
-        volumeSlider.addEventListener('input', syncMobileVolumeIconState);
-        volumeSlider.addEventListener('change', syncMobileVolumeIconState);
-
-        volumeButton.addEventListener('click', (event) => {
-            if (window.innerWidth > 768) {
-                toggleMute();
-            }
-        });
-
-        syncMobileVolumeIconState();
-        volumeFabInitialized = true;
-    };
-
     applyMobileSearchPlacement();
-    applyMobileStreamButtonPlacement();
-    applyMobileVolumePlacement();
-    initMobileVolumeFab();
+    applyMobileSectionState();
 
     window.addEventListener('resize', function() {
-        if (window.innerWidth > 768) {
-            document.body.classList.remove('show-left-section');
-            document.body.classList.remove('mobile-volume-adjusting');
-            state.mobileSection = 'right';
-        }
         applyMobileSearchPlacement();
-        applyMobileStreamButtonPlacement();
-        applyMobileVolumePlacement();
-        initMobileVolumeFab();
+        applyMobileSectionState();
         updatePopoutToggleBtn();
     });
 }

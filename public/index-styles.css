@@ -233,14 +233,15 @@
 
         .title {
             color: var(--text-primary);
-            font-weight: 600;
+            font-weight: 800;
             margin-bottom: 6px;
             font-size: 16px;
         }
 
         .artist-album {
-            color: rgba(158, 158, 158, 0.863);
+            color: var(--text-secondary);
             font-size: 14px;
+            font-weight: 600;
         }
 
         .ip-address {
@@ -767,7 +768,7 @@
         }
 
         .song.now-playing .artist-album {
-            color: rgba(253, 2, 52, 0.8);
+            color: var(--text-secondary);
         }
 
         .song.now-playing:before {
@@ -992,7 +993,7 @@
 
         #right-now-playing .title {
             font-size: 24px;
-            font-weight: 700;
+            font-weight: 900;
             margin-bottom: 6px;
             color: var(--text-primary);
             white-space: normal;
@@ -1012,6 +1013,7 @@
         #right-now-playing .artist {
             font-size: 16px;
             color: var(--text-secondary);
+            font-weight: 600;
             transition: font-size 0.3s ease;
         }
 
@@ -1652,7 +1654,7 @@
                 max-height: min(72dvh, 560px);
             }
             #left-section {
-                display: none !important;
+                display: flex !important;
             }
             #right-section {
                 width: 100vw !important;
@@ -1694,27 +1696,6 @@
             }
             #bottom-controls .bottom-transport {
                 flex: 1 1 auto !important;
-            }
-            #bottom-controls #stream-btn.mobile-bottom-stream {
-                display: inline-flex !important;
-                align-items: center !important;
-                justify-content: center !important;
-                gap: 6px !important;
-                height: 44px !important;
-                min-width: 44px !important;
-                padding: 0 12px !important;
-                border-radius: 12px !important;
-                border: 1px solid rgba(255, 255, 255, 0.25) !important;
-                background: rgba(253, 2, 52, 0.12) !important;
-                color: var(--text-primary) !important;
-                box-shadow: none !important;
-            }
-            #bottom-controls #stream-btn.mobile-bottom-stream .stream-label {
-                font-size: 10px !important;
-                letter-spacing: normal !important;
-            }
-            #bottom-controls #stream-btn.mobile-bottom-stream .stream-icon {
-                font-size: 18px !important;
             }
             
             #right-now-playing-content {
@@ -1891,19 +1872,6 @@
                 margin-top: 0 !important;
                 order: 98 !important;
             }
-            /* --- Fix for toggle: override with body class --- */
-            body.show-left-section #left-section {
-                display: flex !important;
-            }
-            body.show-left-section #right-section {
-                display: none !important;
-            }
-            body:not(.show-left-section) #left-section {
-                display: none !important;
-            }
-            body:not(.show-left-section) #right-section {
-                display: flex !important;
-            }
         }
 
         /* Add spin animation for loading indicator */
@@ -1996,23 +1964,41 @@
                 height: 100dvh;
                 min-height: 100dvh;
                 max-height: 100dvh;
-                transition: transform 0.4s cubic-bezier(0.4,0,0.2,1);
-                will-change: transform;
+                transition: transform 0.42s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.28s ease;
+                will-change: transform, opacity;
             }
             #left-section {
                 z-index: 2;
                 background: var(--bg-dark);
-                transform: translateX(-100vw);
+                transform: translateX(-100%);
+                opacity: 0.5;
+                pointer-events: none;
             }
             #right-section {
                 z-index: 1;
-                transform: translateX(0vw);
+                transform: translateX(0);
+                opacity: 1;
+                pointer-events: auto;
             }
             body.show-left-section #left-section {
-                transform: translateX(0vw);
+                transform: translateX(0);
+                opacity: 1;
+                pointer-events: auto;
             }
             body.show-left-section #right-section {
-                transform: translateX(100vw);
+                transform: translateX(100%);
+                opacity: 0.5;
+                pointer-events: none;
+            }
+            body:not(.show-left-section) #left-section {
+                transform: translateX(-100%);
+                opacity: 0.5;
+                pointer-events: none;
+            }
+            body:not(.show-left-section) #right-section {
+                transform: translateX(0);
+                opacity: 1;
+                pointer-events: auto;
             }
         }
         /* Popout toggle button styles */
@@ -2176,7 +2162,7 @@
     left: 16px;
     transform: translateY(-50%);
     font-size: 12px;
-    color: var(--primary-color);
+    color: var(--lyrics-active-color, var(--text-primary));
     white-space: nowrap;
     opacity: 1;
     font-weight: 600;
@@ -2203,7 +2189,7 @@
 
 #volume-value {
     font-size: 12px;
-    color: var(--primary-color);
+    color: var(--lyrics-active-color, var(--text-primary));
     font-weight: 600;
     min-width: 40px;
 }
@@ -2227,7 +2213,7 @@
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: var(--primary-color);
+    background: var(--lyrics-active-color, var(--text-primary));
     cursor: pointer;
     transition: all var(--transition-speed) ease;
 }
@@ -2240,7 +2226,7 @@
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: var(--primary-color);
+    background: var(--lyrics-active-color, var(--text-primary));
     cursor: pointer;
     border: none;
     transition: all var(--transition-speed) ease;
