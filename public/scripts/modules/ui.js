@@ -249,6 +249,10 @@ export function switchTab(tabName) {
     
     const targetContent = document.getElementById(`${tabName}-results`);
     if (targetContent) targetContent.classList.add('active');
+
+    if (typeof window.loadSearchTab === 'function') {
+        window.loadSearchTab(tabName);
+    }
 }
 
 // Keyboard shortcuts

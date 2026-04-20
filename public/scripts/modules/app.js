@@ -1,211 +1,388 @@
-import { YT_API_KEY, RAPIDAPI_HOST, RAPIDAPI_KEY, hasUsableYouTubeApiKey, hasUsableRapidApiKey } from './config.js';
+import { API_URL } from './config.js';
 import { getThumbnailUrl } from './connection.js';
 import { logMessage } from './utils.js';
 import { addToQueue } from './queue.js';
 import { showToast } from './ui.js';
 
+const SEARCH_TAB_CONFIG = {
+    music: {
+        type: 'song',
+        resultContainerId: 'music-results',
+        emptyText: 'No music found.',
+        errorLabel: 'Music',
+        loadingText: 'Searching music...'
+    },
+    videos: {
+        type: 'videos',
+        resultContainerId: 'videos-results',
+        emptyText: 'No videos found.',
+        errorLabel: 'Video',
+        loadingText: 'Searching videos...'
+    },
+    albums: {
+        type: 'albums',
+        resultContainerId: 'albums-results',
+        emptyText: 'No albums found.',
+        errorLabel: 'Album',
+        loadingText: 'Searching albums...'
+    },
+    'community-playlists': {
+        type: 'community_playlists',
+        resultContainerId: 'community-playlists-results',
+        emptyText: 'No playlists found.',
+        errorLabel: 'Playlist',
+        loadingText: 'Searching playlists...'
+    }
+};
+
+let activeSearchQuery = '';
+let lastSearchRequestToken = 0;
+const loadedSearchTabsByQuery = new Map();
+const inFlightSearchTabs = new Map();
+
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// YouTube Music search
-export async function searchYouTubeMusic(query) {
-    const resultsDiv = document.getElementById('music-results');
-    if (!resultsDiv) return;
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function escapeJsString(value) {
+    return String(value ?? '')
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'");
+}
+
+function extractPlaylistIdentity(item) {
+    const playlistIdCandidates = [
+        item?.playlistId,
+        item?.id?.playlistId,
+        item?.playlist_id,
+        item?.browseId,
+        item?.id?.browseId,
+        item?.navigationEndpoint?.browseEndpoint?.browseId,
+        item?.shareUrl ? (() => {
+            try {
+                const url = new URL(String(item.shareUrl));
+                return url.searchParams.get('list') || '';
+            } catch (_) {
+                return '';
+            }
+        })() : ''
+    ].map((value) => String(value || '').trim()).filter(Boolean);
+
+    return playlistIdCandidates[0] || '';
+}
+
+function extractAlbumIdentity(item) {
+    const albumIdCandidates = [
+        item?.browseId,
+        item?.id?.browseId,
+        item?.albumId,
+        item?.id?.albumId,
+        item?.navigationEndpoint?.browseEndpoint?.browseId
+    ].map((value) => String(value || '').trim()).filter(Boolean);
+
+    return albumIdCandidates[0] || '';
+}
+
+async function fetchCollectionVideoIds(id, kind) {
+    const normalizedId = String(id || '').trim();
+    const normalizedKind = String(kind || '').trim().toLowerCase();
+    if (!normalizedId) {
+        throw new Error(`${normalizedKind || 'Collection'} ID is missing`);
+    }
+    if (normalizedKind !== 'album' && normalizedKind !== 'playlist') {
+        throw new Error('Collection kind is invalid');
+    }
+
+    const response = await fetch(`${API_URL}/collection-items?id=${encodeURIComponent(normalizedId)}&kind=${encodeURIComponent(normalizedKind)}`);
+    const data = await fetchJsonSafe(response);
+    if (!response.ok || !data?.success) {
+        throw new Error(data?.error || response.statusText || 'Collection request failed');
+    }
+
+    const items = Array.isArray(data?.items) ? data.items : [];
+    const videoIds = items
+        .map((item) => String(item?.videoId || '').trim())
+        .filter(Boolean);
+
+    return Array.from(new Set(videoIds));
+}
+
+export async function addCollectionToQueue(id, kind = 'playlist', collectionTitle = 'Playlist') {
+    const normalizedId = String(id || '').trim();
+    const normalizedKind = String(kind || 'playlist').trim().toLowerCase();
+    const defaultTitle = normalizedKind === 'album' ? 'Album' : 'Playlist';
+    const safeCollectionTitle = String(collectionTitle || defaultTitle).trim() || defaultTitle;
+
+    if (!normalizedId) {
+        showToast(`${defaultTitle} ID not found`);
+        return false;
+    }
 
     try {
-        const response = await fetch(`https://youtube-music-api3.p.rapidapi.com/search?q=${encodeURIComponent(query)}&type=song`, {
-            method: 'GET',
-            headers: {
-                'x-rapidapi-host': RAPIDAPI_HOST,
-                'x-rapidapi-key': RAPIDAPI_KEY
+        showToast(`Loading ${safeCollectionTitle}...`);
+        const videoIds = await fetchCollectionVideoIds(normalizedId, normalizedKind);
+        if (!videoIds.length) {
+            throw new Error(`No videos found in ${normalizedKind}`);
+        }
+
+        let successCount = 0;
+        for (let index = 0; index < videoIds.length; index += 1) {
+            const success = await addToQueue(videoIds[index]);
+            if (success) successCount += 1;
+            if (index < videoIds.length - 1) {
+                await delay(250);
             }
-        });
-
-        if (!response.ok) {
-            throw new Error(`API Error: ${response.status}`);
         }
 
-        const data = await response.json();
-        resultsDiv.innerHTML = '';
-
-        if (!data?.result?.length) {
-            resultsDiv.innerHTML = '<div style="padding: 20px; text-align: center;">No music found.</div>';
-            return;
+        if (successCount <= 0) {
+            throw new Error('Failed to add playlist tracks');
         }
 
-        data.result.forEach(song => {
-            const div = document.createElement('div');
-            div.className = 'song';
-            div.innerHTML = `
-                <img class="thumbnail" src="${song.thumbnail}" alt="${song.title}">
-                <div class="details">
-                    <div class="title">${song.title}</div>
-                    <div class="artist-album">${song.author || (song.artists?.join(', ')) || 'Unknown artist'}</div>
-                </div>
-                <button class="search-results-button" onclick="window.addToQueueById('${song.videoId}')">
-                    <span class="material-icons">add</span>
-                </button>
-            `;
-            resultsDiv.appendChild(div);
-        });
+        showToast(`${successCount} songs added from ${safeCollectionTitle}`);
+        return true;
     } catch (error) {
-        resultsDiv.innerHTML = `<div style="padding: 20px; text-align: center; color: rgba(253,2,52,1);">Error: ${error.message}</div>`;
-        if (logMessage) logMessage(`Music search failed: ${error.message}`);
+        const message = String(error?.message || error || `${defaultTitle} import failed`);
+        showToast(`${defaultTitle} add failed: ${message}`);
+        if (logMessage) logMessage(`${defaultTitle} add failed: ${message}`);
+        return false;
     }
 }
 
-// YouTube Videos search
-export async function searchYouTubeVideos(query) {
-    const resultsDiv = document.getElementById('videos-results');
+function renderSearchResults(resultsDiv, items, options = {}) {
     if (!resultsDiv) return;
+    const { emptyText = 'No results found.' } = options;
 
-    // Helpers (kept local to avoid touching other modules)
     const safeText = (v) => (v === null || v === undefined) ? '' : String(v);
-    const fetchJsonSafe = async (res) => {
-        const contentType = res.headers?.get?.('content-type') || '';
-        if (contentType.includes('application/json')) {
-            try { return await res.json(); } catch (_) { return null; }
-        }
-        try { return await res.text(); } catch (_) { return null; }
-    };
+    resultsDiv.innerHTML = '';
 
-    const render = (items) => {
-        resultsDiv.innerHTML = '';
-        if (!Array.isArray(items) || items.length === 0) {
-            resultsDiv.innerHTML = '<div style="padding: 20px; text-align: center;">No videos found.</div>';
-            return;
-        }
+    if (!Array.isArray(items) || items.length === 0) {
+        resultsDiv.innerHTML = `<div style="padding: 20px; text-align: center;">${escapeHtml(emptyText)}</div>`;
+        return;
+    }
 
-        items.forEach(item => {
-            // Normalize a few possible shapes (Google API vs RapidAPI wrappers)
-            const videoId =
-                item?.id?.videoId ||
-                item?.videoId ||
-                item?.video_id ||
-                item?.id;
+    items.forEach((item) => {
+        const videoId =
+            item?.id?.videoId ||
+            item?.videoId ||
+            item?.video_id ||
+            (typeof item?.id === 'string' ? item.id : '');
 
-            const title =
-                item?.snippet?.title ||
-                item?.title ||
-                item?.name ||
-                'Untitled';
+        const title =
+            item?.snippet?.title ||
+            item?.title ||
+            item?.name ||
+            'Untitled';
+        const playlistId = extractPlaylistIdentity(item);
+        const albumId = extractAlbumIdentity(item);
 
-            const channelTitle =
-                item?.snippet?.channelTitle ||
-                item?.author ||
-                item?.channelName ||
-                item?.channel ||
-                '';
+        const subtitleParts = [
+            item?.snippet?.channelTitle,
+            item?.author,
+            Array.isArray(item?.artists) ? item.artists.join(', ') : '',
+            item?.channelName,
+            item?.channel,
+            item?.artist,
+            item?.type
+        ].map((part) => safeText(part).trim()).filter(Boolean);
 
-            const originalThumbnailUrl =
-                item?.snippet?.thumbnails?.high?.url ||
-                item?.snippet?.thumbnails?.medium?.url ||
-                item?.thumbnail ||
-                item?.thumbnails?.[0]?.url ||
-                item?.thumbnails?.[0] ||
-                '';
+        const subtitle = subtitleParts[0] || 'Unknown artist';
 
-            const thumbnailUrl = getThumbnailUrl(originalThumbnailUrl);
+        const originalThumbnailUrl =
+            item?.snippet?.thumbnails?.high?.url ||
+            item?.snippet?.thumbnails?.medium?.url ||
+            item?.thumbnail ||
+            item?.thumbnails?.[0]?.url ||
+            item?.thumbnails?.[0] ||
+            '';
 
-            if (!videoId) return;
-
-            const div = document.createElement('div');
-            div.className = 'song';
-            div.innerHTML = `
-                <img class="thumbnail" src="${thumbnailUrl}" alt="${safeText(title)}">
-                <div class="details">
-                    <div class="title">${safeText(title)}</div>
-                    <div class="artist-album">${safeText(channelTitle)}</div>
-                </div>
-                <button class="search-results-button" onclick="window.addToQueueById('${safeText(videoId)}')">
+        const thumbnailUrl = getThumbnailUrl(originalThumbnailUrl) || originalThumbnailUrl || '/icons/album-cover-placeholder.png';
+        let addButtonHtml = '';
+        if (videoId) {
+            addButtonHtml = `
+                <button class="search-results-button" onclick="window.addToQueueById('${escapeHtml(safeText(videoId))}')" title="Add to queue">
                     <span class="material-icons">add</span>
                 </button>
             `;
-            resultsDiv.appendChild(div);
-        });
-    };
-
-    // Strategy:
-    // 1) Try official YouTube Data API (if key is usable).
-    // 2) If forbidden/quota/key-restricted (common cause of 403 in browser), fall back to RapidAPI search
-    //    so the "Video" tab still works without requiring Google key changes on the client.
-    try {
-        // ------------------------
-        // 1) YouTube Data API v3
-        // ------------------------
-        const hasKey = hasUsableYouTubeApiKey();
-        if (hasKey) {
-            const url = new URL('https://www.googleapis.com/youtube/v3/search');
-            url.searchParams.set('part', 'snippet');
-            url.searchParams.set('type', 'video');
-            url.searchParams.set('maxResults', '10');
-            url.searchParams.set('q', query);
-            url.searchParams.set('videoCategoryId', '10'); // Music
-            url.searchParams.set('regionCode', 'US');
-            url.searchParams.set('key', YT_API_KEY);
-
-            const response = await fetch(url.toString());
-            if (response.ok) {
-                const data = await response.json();
-                render(data?.items || []);
-                return;
-            }
-
-            // If YouTube returns an error body, surface it (and decide whether to fall back).
-            const errBody = await fetchJsonSafe(response);
-            const apiMsg =
-                errBody?.error?.message ||
-                (typeof errBody === 'string' ? errBody : '') ||
-                response.statusText ||
-                `HTTP ${response.status}`;
-
-            // Only fall back on common "browser key" failures
-            if (![400, 401, 403, 429].includes(response.status)) {
-                throw new Error(apiMsg);
-            }
-
-            console.warn('[VIDEO] YouTube Data API failed, falling back:', response.status, apiMsg);
-        } else if (!hasUsableRapidApiKey()) {
-            console.warn('[VIDEO] Missing/placeholder YT_API_KEY and RAPIDAPI_KEY.');
+        } else if (albumId) {
+            addButtonHtml = `
+                <button class="search-results-button" onclick="window.addCollectionToQueue('${escapeJsString(albumId)}', 'album', '${escapeJsString(safeText(title))}')" title="Add all songs from album">
+                    <span class="material-icons">album</span>
+                </button>
+            `;
+        } else if (playlistId) {
+            addButtonHtml = `
+                <button class="search-results-button" onclick="window.addCollectionToQueue('${escapeJsString(playlistId)}', 'playlist', '${escapeJsString(safeText(title))}')" title="Add all songs from playlist">
+                    <span class="material-icons">playlist_add</span>
+                </button>
+            `;
+        } else {
+            addButtonHtml = `
+                <button class="search-results-button" disabled title="No direct video or playlist to add">
+                    <span class="material-icons">remove</span>
+                </button>
+            `;
         }
 
-        // ------------------------
-        // 2) Fallback: RapidAPI (same provider you already use for Music tab)
-        // ------------------------
-        const rapidResponse = await fetch(`https://youtube-music-api3.p.rapidapi.com/search?q=${encodeURIComponent(query)}&type=video`, {
-            method: 'GET',
-            headers: {
-                'x-rapidapi-host': RAPIDAPI_HOST,
-                'x-rapidapi-key': RAPIDAPI_KEY
-            }
-        });
+        const div = document.createElement('div');
+        div.className = 'song';
+        div.innerHTML = `
+            <img class="thumbnail" src="${escapeHtml(thumbnailUrl)}" alt="${escapeHtml(safeText(title))}">
+            <div class="details">
+                <div class="title">${escapeHtml(safeText(title))}</div>
+                <div class="artist-album">${escapeHtml(subtitle)}</div>
+            </div>
+            ${addButtonHtml}
+        `;
+        resultsDiv.appendChild(div);
+    });
+}
 
-        if (!rapidResponse.ok) {
-            const errBody = await fetchJsonSafe(rapidResponse);
+async function fetchJsonSafe(res) {
+    const contentType = res.headers?.get?.('content-type') || '';
+    if (contentType.includes('application/json')) {
+        try { return await res.json(); } catch (_) { return null; }
+    }
+    try { return await res.text(); } catch (_) { return null; }
+}
+
+function setSearchLoadingState(tabName, loadingText) {
+    const config = SEARCH_TAB_CONFIG[tabName];
+    const resultsDiv = document.getElementById(config?.resultContainerId || '');
+    if (!resultsDiv) return;
+    resultsDiv.innerHTML = `<div style="padding: 20px; text-align: center;">${escapeHtml(loadingText || 'Loading...')}</div>`;
+}
+
+function setSearchIdleState(tabName) {
+    const config = SEARCH_TAB_CONFIG[tabName];
+    const resultsDiv = document.getElementById(config?.resultContainerId || '');
+    if (!resultsDiv) return;
+    resultsDiv.innerHTML = `<div style="padding: 20px; text-align: center; color: var(--text-secondary);">Click this tab to load results.</div>`;
+}
+
+function resetSearchTabCacheForQuery(query) {
+    const normalizedQuery = String(query || '').trim();
+    if (!normalizedQuery) return;
+    loadedSearchTabsByQuery.delete(normalizedQuery);
+    for (const key of Array.from(inFlightSearchTabs.keys())) {
+        if (key.startsWith(`${normalizedQuery}::`)) {
+            inFlightSearchTabs.delete(key);
+        }
+    }
+}
+
+function markSearchTabLoaded(query, tabName) {
+    const normalizedQuery = String(query || '').trim();
+    if (!normalizedQuery) return;
+    const loadedTabs = loadedSearchTabsByQuery.get(normalizedQuery) || new Set();
+    loadedTabs.add(tabName);
+    loadedSearchTabsByQuery.set(normalizedQuery, loadedTabs);
+}
+
+function isSearchTabLoaded(query, tabName) {
+    const normalizedQuery = String(query || '').trim();
+    if (!normalizedQuery) return false;
+    return loadedSearchTabsByQuery.get(normalizedQuery)?.has(tabName) === true;
+}
+
+async function searchRapidApiByType(query, type, resultContainerId, emptyText, errorLabel, requestToken = 0) {
+    const resultsDiv = document.getElementById(resultContainerId);
+    if (!resultsDiv) return;
+    const safeText = (v) => (v === null || v === undefined) ? '' : String(v);
+
+    try {
+        const rapidResponse = await fetch(`${API_URL}/search?q=${encodeURIComponent(query)}&type=${encodeURIComponent(type)}`);
+
+        const rapidData = await fetchJsonSafe(rapidResponse);
+        if (!rapidResponse.ok || !rapidData?.success) {
             const apiMsg =
-                errBody?.message ||
-                errBody?.error?.message ||
-                (typeof errBody === 'string' ? errBody : '') ||
+                rapidData?.error ||
+                rapidData?.message ||
                 rapidResponse.statusText ||
                 `HTTP ${rapidResponse.status}`;
             throw new Error(apiMsg);
         }
 
-        const rapidData = await rapidResponse.json();
-
-        // Most responses are { result: [...] } but we keep it defensive.
-        render(rapidData?.result || rapidData?.items || []);
+        if (requestToken && requestToken !== lastSearchRequestToken) {
+            return;
+        }
+        renderSearchResults(resultsDiv, rapidData?.result || rapidData?.items || [], { emptyText });
     } catch (error) {
+        if (requestToken && requestToken !== lastSearchRequestToken) {
+            return;
+        }
         const msg = safeText(error?.message || error);
         resultsDiv.innerHTML = `<div style="padding: 20px; text-align: center; color: rgba(253,2,52,1);">Error: ${msg}</div>`;
-        if (logMessage) logMessage(`Video search failed: ${msg}`);
+        if (logMessage) logMessage(`${errorLabel} search failed: ${msg}`);
     }
+}
+
+export async function loadSearchTab(tabName, query = activeSearchQuery, options = {}) {
+    const normalizedTab = String(tabName || '').trim();
+    const normalizedQuery = String(query || '').trim();
+    const config = SEARCH_TAB_CONFIG[normalizedTab];
+    const requestToken = Number(options.requestToken) || lastSearchRequestToken;
+
+    if (!config || !normalizedQuery) return;
+    if (requestToken !== lastSearchRequestToken) return;
+    if (isSearchTabLoaded(normalizedQuery, normalizedTab)) return;
+
+    const inFlightKey = `${normalizedQuery}::${normalizedTab}`;
+    if (inFlightSearchTabs.has(inFlightKey)) {
+        return inFlightSearchTabs.get(inFlightKey);
+    }
+
+    setSearchLoadingState(normalizedTab, config.loadingText);
+
+    const task = searchRapidApiByType(
+        normalizedQuery,
+        config.type,
+        config.resultContainerId,
+        config.emptyText,
+        config.errorLabel,
+        requestToken
+    ).then(() => {
+        if (requestToken === lastSearchRequestToken) {
+            markSearchTabLoaded(normalizedQuery, normalizedTab);
+        }
+    }).finally(() => {
+        inFlightSearchTabs.delete(inFlightKey);
+    });
+
+    inFlightSearchTabs.set(inFlightKey, task);
+    return task;
+}
+
+// YouTube Music search
+export async function searchYouTubeMusic(query) {
+    return loadSearchTab('music', query);
+}
+
+// YouTube Videos search
+export async function searchYouTubeVideos(query) {
+    return loadSearchTab('videos', query);
+}
+
+export async function searchYouTubeAlbums(query) {
+    return loadSearchTab('albums', query);
+}
+
+export async function searchYouTubeCommunityPlaylists(query) {
+    return loadSearchTab('community-playlists', query);
 }
 
 // Unified search handler
 export async function handleUnifiedSearch(query) {
-    if (!query) {
+    const normalizedQuery = String(query || '').trim();
+    if (!normalizedQuery) {
         if (logMessage) logMessage('Please enter a search term.');
         return;
     }
@@ -220,20 +397,28 @@ export async function handleUnifiedSearch(query) {
         hideButton.textContent = 'hide search';
     }
 
-    const musicResults = document.getElementById('music-results');
-    const videosResults = document.getElementById('videos-results');
-    
-    if (musicResults) {
-        musicResults.innerHTML = '<div style="padding: 20px; text-align: center;">Searching music...</div>';
-    }
-    if (videosResults) {
-        videosResults.innerHTML = '<div style="padding: 20px; text-align: center;">Searching videos...</div>';
+    const isNewQuery = normalizedQuery !== activeSearchQuery;
+    activeSearchQuery = normalizedQuery;
+    lastSearchRequestToken += 1;
+    const requestToken = lastSearchRequestToken;
+
+    if (isNewQuery) {
+        resetSearchTabCacheForQuery(normalizedQuery);
+        Object.keys(SEARCH_TAB_CONFIG).forEach((tabName) => {
+            if (tabName === 'music') {
+                setSearchLoadingState(tabName, SEARCH_TAB_CONFIG[tabName].loadingText);
+                return;
+            }
+            setSearchIdleState(tabName);
+        });
     }
 
-    await Promise.all([
-        searchYouTubeMusic(query),
-        searchYouTubeVideos(query)
-    ]);
+    const musicTabButton = document.getElementById('music-tab');
+    if (musicTabButton && !musicTabButton.classList.contains('active')) {
+        musicTabButton.click();
+    }
+
+    await loadSearchTab('music', normalizedQuery, { requestToken });
 }
 
 function extractYouTubeVideoId(rawValue) {

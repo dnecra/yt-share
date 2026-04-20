@@ -1,17 +1,6 @@
 // Configuration and shared state
 export const API_URL = '/api/v1';
 export const MAX_RECONNECT_ATTEMPTS = 10;
-export const YT_API_KEY = globalThis.YT_API_KEY || '';
-export const RAPIDAPI_HOST = 'youtube-music-api3.p.rapidapi.com';
-export const RAPIDAPI_KEY = globalThis.RAPIDAPI_KEY || '6e9c0a131fmshb2c000221e56a88p1505d8jsn8afc28ef47a5';
-
-export function hasUsableYouTubeApiKey() {
-    return Boolean(YT_API_KEY) && !/YOUR_|REPLACE|CHANGEME/i.test(String(YT_API_KEY));
-}
-
-export function hasUsableRapidApiKey() {
-    return Boolean(RAPIDAPI_KEY) && !/YOUR_|REPLACE|CHANGEME/i.test(String(RAPIDAPI_KEY));
-}
 
 // Shared state
 export const state = {

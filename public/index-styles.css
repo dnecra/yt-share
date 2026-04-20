@@ -1252,6 +1252,66 @@
         #lyrics-container .lyrics-toggle .material-icons {
             font-size: 16px;
         }
+        .main-lyrics-mini-btn {
+            position: relative;
+        }
+        .main-lyrics-mini-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 16px;
+            height: 16px;
+            pointer-events: none;
+        }
+        .main-lyrics-mini-icon svg {
+            width: 16px;
+            height: 16px;
+            display: block;
+            flex-shrink: 0;
+            pointer-events: none;
+        }
+        #main-lyrics-weight-btn .main-lyrics-mini-icon svg {
+            transform: scale(1.125);
+            transform-origin: center;
+        }
+        #main-lyrics-bg-btn .main-lyrics-mini-icon svg {
+            color: var(--lyrics-bg-icon-color, currentColor);
+            transform: scale(1.5);
+            transform-origin: center;
+        }
+        #main-lyrics-color-btn .main-lyrics-mini-icon svg {
+            color: var(--lyrics-theme-cycle-color, rgba(255, 255, 255, 0.82));
+            transform: scale(1.5);
+            transform-origin: center;
+        }
+        #lyrics-font-controls .lyrics-btn-label {
+            position: absolute;
+            right: calc(100% + 10px);
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(18, 18, 18, 0.82);
+            color: rgba(255, 255, 255, 0.95);
+            font-family: "Inter", "Inter Tight", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.01em;
+            white-space: nowrap;
+            padding: 1px 5px;
+            border-radius: 4px;
+            border: 0;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.14s ease, transform 0.14s ease;
+            box-shadow: none;
+            z-index: 10010;
+        }
+        #lyrics-font-up-btn:hover .lyrics-btn-label,
+        #lyrics-font-down-btn:hover .lyrics-btn-label,
+        #main-lyrics-weight-btn:hover .lyrics-btn-label,
+        #main-lyrics-bg-btn:hover .lyrics-btn-label,
+        #main-lyrics-color-btn:hover .lyrics-btn-label {
+            opacity: 1;
+        }
         #lyrics-collapse-btn {
             position: relative;
             width: 32px;
@@ -1282,62 +1342,79 @@
             transform: rotate(180deg) !important;
         }
         #lyrics-font-controls {
-            position: fixed;
-            right: 32px;
-            bottom: calc(var(--safe-bottom) + 162px);
+            position: absolute;
+            right: 16px;
+            bottom: 16px;
             display: flex;
             flex-direction: column;
             gap: 8px;
-            z-index: 1;
+            z-index: 1004;
             pointer-events: none;
             opacity: 0;
-            transform: translateY(8px);
-            transition: opacity 0.25s ease, transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+            transform: none;
+            transition: opacity 0.16s ease;
         }
-        #right-section:has(#lyrics-container.has-lyrics:not(.loading-lyrics)) #lyrics-font-controls {
+        #lyrics-container.has-lyrics:not(.loading-lyrics) #lyrics-font-controls {
+            opacity: 0;
+            transform: none;
+            pointer-events: none;
+        }
+        #lyrics-container.has-lyrics:not(.loading-lyrics):hover #lyrics-font-controls,
+        #lyrics-container.has-lyrics:not(.loading-lyrics) #lyrics-font-controls:hover {
             opacity: 1;
-            transform: translateY(0);
+            transform: none;
             pointer-events: auto;
         }
-        #right-section:has(#lyrics-container.loading-lyrics) #lyrics-font-controls,
-        #right-section:has(#lyrics-container:not(.has-lyrics)) #lyrics-font-controls {
+        #lyrics-container.loading-lyrics #lyrics-font-controls,
+        #lyrics-container:not(.has-lyrics) #lyrics-font-controls {
             opacity: 0;
-            transform: translateY(8px);
+            transform: none;
             pointer-events: none;
         }
-        #right-section:has(#lyrics-container.collapsed) #lyrics-font-controls {
+        #lyrics-container.collapsed #lyrics-font-controls {
             opacity: 0;
-            transform: translateY(8px);
+            transform: none;
             pointer-events: none;
         }
         body.lyrics-collapsed #lyrics-font-controls {
             opacity: 0 !important;
-            transform: translateY(8px) !important;
+            transform: none !important;
             pointer-events: none !important;
         }
         .lyrics-font-btn {
             position: relative;
-            width: 16px;
-            height: 16px;
+            width: 32px;
+            height: 32px;
             border-radius: 50%;
-            border: 1px solid rgba(255, 255, 255, 0.3);
-            background: transparent;
+            border: 1.5px solid rgba(255, 255, 255, 0.22);
+            background: rgba(28, 28, 28, 0.88);
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
             z-index: 1004;
-            transition: border-color 0.3s ease;
+            transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.14s ease, box-shadow 0.16s ease;
             padding: 0;
-            color: rgba(255, 255, 255, 0.75);
+            color: rgba(255, 255, 255, 0.82);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.55), 0 0 0 0.5px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(16px) saturate(1.6);
+            -webkit-backdrop-filter: blur(16px) saturate(1.6);
         }
         .lyrics-font-btn:hover {
-            border-color: rgba(255, 255, 255, 0.5);
+            background: rgba(36, 36, 36, 0.96);
+            border-color: rgba(255, 255, 255, 0.34);
+            color: rgba(255, 255, 255, 0.95);
+        }
+        .lyrics-font-btn:focus-visible {
+            outline: none;
+            background: rgba(36, 36, 36, 0.96);
+            border-color: rgba(255, 255, 255, 0.34);
             color: rgba(255, 255, 255, 0.95);
         }
         .lyrics-font-btn .material-icons {
-            font-size: 10px;
+            font-size: 15px;
             line-height: 1;
+            pointer-events: none;
         }
         .top-action-btn {
             position: relative;
@@ -1620,6 +1697,10 @@
             }
             #lyrics-content {
                 padding: 56px 12px 16px 12px !important;
+            }
+            .main-lyrics-mini-btn {
+                width: 32px;
+                height: 32px;
             }
             #bottom-controls {
                 margin: 0 !important;

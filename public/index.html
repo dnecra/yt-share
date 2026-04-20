@@ -100,12 +100,16 @@
                         <div id="search-tabs">
                             <button id="music-tab" class="search-tab active" onclick="switchTab('music')">Music</button>
                             <button id="videos-tab" class="search-tab" onclick="switchTab('videos')">Videos</button>
+                            <button id="albums-tab" class="search-tab" onclick="switchTab('albums')">Albums</button>
+                            <button id="community-playlists-tab" class="search-tab" onclick="switchTab('community-playlists')">Playlist</button>
                         </div>
                         <button id="hide-button" onclick="toggleSearchResults()">hide search</button>
                     </div>
                     <div id="search-results-tabs">
                         <div id="music-results" class="tab-content active"></div>
                         <div id="videos-results" class="tab-content"></div>
+                        <div id="albums-results" class="tab-content"></div>
+                        <div id="community-playlists-results" class="tab-content"></div>
                     </div>
                 </div>
             </div>
@@ -173,14 +177,28 @@
                     <div id="synced-lyrics"></div>
                     <div id="plain-lyrics"></div>
                 </div>
-            </div>
-            <div id="lyrics-font-controls">
-                <button id="lyrics-font-up-btn" class="lyrics-font-btn" title="Increase lyrics font size">
-                    <span class="material-icons">add</span>
-                </button>
-                <button id="lyrics-font-down-btn" class="lyrics-font-btn" title="Decrease lyrics font size">
-                    <span class="material-icons">remove</span>
-                </button>
+                <div id="lyrics-font-controls">
+                    <button id="lyrics-font-up-btn" class="lyrics-font-btn" title="Increase lyrics font size">
+                        <span class="material-icons">add</span>
+                        <span class="lyrics-btn-label" aria-hidden="true">Font Size (+)</span>
+                    </button>
+                    <button id="lyrics-font-down-btn" class="lyrics-font-btn" title="Decrease lyrics font size">
+                        <span class="material-icons">remove</span>
+                        <span class="lyrics-btn-label" aria-hidden="true">Font Size (-)</span>
+                    </button>
+                    <button id="main-lyrics-weight-btn" class="lyrics-font-btn main-lyrics-mini-btn" type="button" title="Cycle lyric font weight" aria-label="Cycle lyric font weight">
+                        <span class="main-lyrics-mini-icon" aria-hidden="true"></span>
+                        <span class="lyrics-btn-label" aria-hidden="true">Weight</span>
+                    </button>
+                    <button id="main-lyrics-bg-btn" class="lyrics-font-btn main-lyrics-mini-btn" type="button" title="Cycle lyric background" aria-label="Cycle lyric background">
+                        <span class="main-lyrics-mini-icon" aria-hidden="true"></span>
+                        <span class="lyrics-btn-label" aria-hidden="true">Font BG</span>
+                    </button>
+                    <button id="main-lyrics-color-btn" class="lyrics-font-btn main-lyrics-mini-btn" type="button" title="Cycle lyric color" aria-label="Cycle lyric color">
+                        <span class="main-lyrics-mini-icon" aria-hidden="true"></span>
+                        <span class="lyrics-btn-label" aria-hidden="true">Color</span>
+                    </button>
+                </div>
             </div>
 
             <div id="bottom-controls">
