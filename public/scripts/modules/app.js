@@ -824,54 +824,13 @@ export function startStream() {
     
     audioPlayer.addEventListener('playing', onPlaying, { once: true });
     
-    // Start playback
+    // Start playback - straight stream, no exe detection
     audioPlayer.play().catch(err => {
-        if (err.message.includes('no supported source was found')) {
-            updateStatus('Launching swyh-rs on server... Coba pencet Audio Stream lagi', true);
-            launchSwyhOnServer().then(() => {
-                updateStatus('SWYH launched, connecting...');
-                setTimeout(() => {
-                    startStream();
-                }, 3000);
-            }).catch(launchErr => {
-                updateStatus('Failed to launch SWYH: ' + launchErr.message, true);
-                startAutoReconnect(audioPlayer, toggleBtn);
-            });
-        } else {
-            updateStatus('Failed to start: ' + err.message, true);
-            startAutoReconnect(audioPlayer, toggleBtn);
-        }
+        updateStatus('Failed to start: ' + err.message, true);
+        startAutoReconnect(audioPlayer, toggleBtn);
     });
     
     console.log('[STREAM] Stream started');
-}
-
-async function launchSwyhOnServer() {
-    try {
-        const response = await fetch('/launch-swyh', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                executablePath: 'C:\\Program Files\\swyh-rs\\swyh-rs.exe'
-            })
-        });
-        
-        if (!response.ok) {
-            throw new Error('Server returned error: ' + response.status);
-        }
-        
-        const result = await response.json();
-        if (!result.success) {
-            throw new Error(result.message || 'Unknown error');
-        }
-        
-        return result;
-    } catch (error) {
-        console.error('[STREAM] Failed to launch SWYH:', error);
-        throw error;
-    }
 }
 
 function maintainLiveSync(audioPlayer) {

@@ -5,10 +5,7 @@ let lastRenderedLyricsExpanded = null;
 const MUSIC_NOTE_SYMBOL = '\u266A';
 const GAP_FILL_BASE_THRESHOLD_SECONDS = 20;
 const FINAL_BLANK_TARGET_GAP_SECONDS = 5;
-// Apply a small runtime lead without rewriting provider timestamps.
 const LYRICS_OFFSET_SECONDS = -1;
-const LYRIC_BACKWARD_SEEK_THRESHOLD_SECONDS = 2.0;
-const LYRIC_INDEX_HYSTERESIS_SECONDS = 0;
 const AUTO_CENTER_TOLERANCE_PX = 6;
 const AUTO_CENTER_RETARGET_DEADZONE_PX = 8;
 let lyricLineElements = [];
@@ -37,13 +34,6 @@ function isBlankCutoffEnabledForCurrentPage() {
     }
     // Default to enabled unless the page explicitly disables it.
     return window.__lyricsBlankCutoffEnabled !== false;
-}
-
-function applyLyricsTimingOffset(currentTimeSeconds) {
-    const numericTime = Number(currentTimeSeconds);
-    if (!Number.isFinite(numericTime)) return 0;
-    // Negative offset means show lyrics earlier than playback.
-    return Math.max(0, numericTime - LYRICS_OFFSET_SECONDS);
 }
 
 function clearPendingLyricsContainerHide() {
@@ -560,7 +550,7 @@ function getLyricLineTime(lines, index) {
     return Number.isFinite(time) ? time : null;
 }
 
-function stabilizeCurrentLyricIndex(lines, candidateIndex, effectiveTime, previousIndex, { didBackwardSeek = false } = {}) {
+function stabilizeCurrentLyricIndex(lines, candidateIndex, effectiveTime, previousIndex) {
     if (!Array.isArray(lines) || lines.length === 0) return candidateIndex;
     if (!Number.isFinite(candidateIndex) || candidateIndex < 0) return candidateIndex;
     if (!Number.isFinite(previousIndex) || previousIndex < 0) return candidateIndex;
@@ -568,24 +558,17 @@ function stabilizeCurrentLyricIndex(lines, candidateIndex, effectiveTime, previo
 
     const jumpDistance = Math.abs(candidateIndex - previousIndex);
     if (jumpDistance > 1) return candidateIndex;
-
-    const hysteresis = LYRIC_INDEX_HYSTERESIS_SECONDS;
     const previousLineTime = getLyricLineTime(lines, previousIndex);
     const candidateLineTime = getLyricLineTime(lines, candidateIndex);
 
     if (candidateIndex === previousIndex + 1) {
         if (!Number.isFinite(candidateLineTime)) return candidateIndex;
-        return effectiveTime >= (candidateLineTime + hysteresis)
-            ? candidateIndex
-            : previousIndex;
+        return effectiveTime >= candidateLineTime ? candidateIndex : previousIndex;
     }
 
     if (candidateIndex === previousIndex - 1) {
-        if (didBackwardSeek) return candidateIndex;
         if (!Number.isFinite(previousLineTime)) return candidateIndex;
-        return effectiveTime < (previousLineTime - hysteresis)
-            ? candidateIndex
-            : previousIndex;
+        return effectiveTime < previousLineTime ? candidateIndex : previousIndex;
     }
 
     return candidateIndex;
@@ -873,30 +856,17 @@ export async function fetchLyrics(artist, title, album = '', duration = 0, onSuc
 
 // Lyrics display update
 export function updateLyricsDisplay(currentTime, options = {}) {
-    const { trustedTiming = false } = options;
     const numericTime = Number(currentTime);
     if (!Number.isFinite(numericTime)) return;
-    currentTime = Math.max(0, numericTime);
-
-    const rawEffectiveTime = applyLyricsTimingOffset(currentTime);
-    let didBackwardSeek = false;
+    // Shift only the active-line selection window. Playback timing, provider
+    // timestamps, and animation durations still use the original source data.
+    const rawEffectiveTime = Math.max(0, numericTime - LYRICS_OFFSET_SECONDS);
     const effectiveTime = (() => {
         const prev = Number(lastStableLyricEffectiveTime);
         if (!Number.isFinite(prev)) {
             lastStableLyricEffectiveTime = rawEffectiveTime;
             return rawEffectiveTime;
         }
-        if (rawEffectiveTime >= prev) {
-            lastStableLyricEffectiveTime = rawEffectiveTime;
-            return rawEffectiveTime;
-        }
-
-        const backwardDelta = prev - rawEffectiveTime;
-        if (!trustedTiming && backwardDelta <= LYRIC_BACKWARD_SEEK_THRESHOLD_SECONDS) {
-            return prev;
-        }
-
-        didBackwardSeek = true;
         lastStableLyricEffectiveTime = rawEffectiveTime;
         return rawEffectiveTime;
     })();
@@ -909,8 +879,7 @@ export function updateLyricsDisplay(currentTime, options = {}) {
         state.currentLyrics,
         currentIndex,
         effectiveTime,
-        lastRenderedLyricIndex,
-        { didBackwardSeek }
+        lastRenderedLyricIndex
     );
 
     const lyricsContainer = document.getElementById('lyrics-container');
@@ -963,9 +932,7 @@ export function updateLyricsDisplay(currentTime, options = {}) {
         return idx;
     })();
     if (isBlankCutoffEnabledForCurrentPage()) {
-        if (didBackwardSeek) {
-            latchedBlankCutoffIndex = latestBlankCutoffIndex;
-        } else if (latestBlankCutoffIndex > latchedBlankCutoffIndex) {
+        if (latestBlankCutoffIndex > latchedBlankCutoffIndex) {
             latchedBlankCutoffIndex = latestBlankCutoffIndex;
         }
     } else {
@@ -1275,12 +1242,14 @@ function parseSyncedLyrics(syncedSource) {
                 const time = Number.isFinite(numericTime) ? numericTime : 0;
                 const text = (item?.text || '').toString();
                 const isIncomingBlank = !!item?.isEmpty || !!item?.isSourceBlank || text.trim() === '';
+                const rawSourceIndex = Number(item?.sourceIndex);
+                const rawParsedIndex = Number(item?.parsedIndex);
                 return createLyricLine({
                     time,
                     rawTime: time,
                     text: isIncomingBlank ? '' : text,
-                    sourceIndex,
-                    parsedIndex: sourceIndex
+                    sourceIndex: Number.isFinite(rawSourceIndex) && rawSourceIndex >= 0 ? rawSourceIndex : sourceIndex,
+                    parsedIndex: Number.isFinite(rawParsedIndex) && rawParsedIndex >= 0 ? rawParsedIndex : sourceIndex
                 });
             })
             .filter(Boolean)));
@@ -1377,7 +1346,7 @@ export function displayLyricsUI(data, {
     const rightNowPlaying = document.getElementById('song-info');
     clearPendingLyricsContainerHide();
 
-    const revealLyricsBlock = (activeContainer, inactiveContainer) => {
+    const revealLyricsBlock = (activeContainer, inactiveContainer, beforeReveal = null) => {
         if (inactiveContainer) {
             inactiveContainer.classList.remove('revealed');
             inactiveContainer.style.display = 'none';
@@ -1386,6 +1355,9 @@ export function displayLyricsUI(data, {
 
         activeContainer.classList.remove('revealed');
         activeContainer.style.display = 'flex';
+        if (typeof beforeReveal === 'function') {
+            beforeReveal();
+        }
         // Replay content reveal even if the same container was already visible.
         void activeContainer.offsetHeight;
         requestAnimationFrame(() => {
@@ -1399,6 +1371,7 @@ export function displayLyricsUI(data, {
         lyricsContainer.classList.add('no-lyrics');
         lyricsContainer.classList.add('loading-lyrics');
         lyricsContainer.classList.remove('has-lyrics');
+        updateLyricDisplayModeDomState(normalizeLyricDisplayMode(currentLyricDisplayMode));
     }
 
     // Check if there are existing lyrics to animate out
@@ -1505,19 +1478,21 @@ animateOutLyrics().then(() => {
                     if (!Array.isArray(sourceItems)) return null;
                     const bySourceIndex = new Map();
                     const byParsedIndex = new Map();
+                    let hasSourceIndexes = false;
                     sourceItems.forEach((item, idx) => {
                         const text = (item?.text || '').toString();
                         const rawSourceIndex = Number(item?.sourceIndex);
                         const rawParsedIndex = Number(item?.parsedIndex);
                         if (Number.isFinite(rawSourceIndex) && rawSourceIndex >= 0 && !bySourceIndex.has(rawSourceIndex)) {
                             bySourceIndex.set(rawSourceIndex, text);
+                            hasSourceIndexes = true;
                         }
                         const parsedKey = Number.isFinite(rawParsedIndex) && rawParsedIndex >= 0 ? rawParsedIndex : idx;
                         if (!byParsedIndex.has(parsedKey)) {
                             byParsedIndex.set(parsedKey, text);
                         }
                     });
-                    return { bySourceIndex, byParsedIndex };
+                    return { bySourceIndex, byParsedIndex, hasSourceIndexes };
                 };
                 const romanizedAssistMaps = buildAssistIndexMaps(romanizedSyncedSource);
                 const translatedAssistMaps = buildAssistIndexMaps(translatedSyncedSource);
@@ -1526,6 +1501,9 @@ animateOutLyrics().then(() => {
                     const sourceIndex = Number(line?.sourceIndex);
                     if (Number.isFinite(sourceIndex) && sourceIndex >= 0 && maps.bySourceIndex.has(sourceIndex)) {
                         return (maps.bySourceIndex.get(sourceIndex) || '').toString();
+                    }
+                    if (maps.hasSourceIndexes && Number.isFinite(sourceIndex) && sourceIndex >= 0) {
+                        return '';
                     }
                     const parsedIndex = Number(line?.parsedIndex);
                     if (Number.isFinite(parsedIndex) && parsedIndex >= 0) {
@@ -1592,7 +1570,9 @@ animateOutLyrics().then(() => {
                     }
 
                     if (isFetchStillValid() && isRenderStillCurrent()) {
-                        revealLyricsBlock(syncedLyricsContainer, plainLyricsContainer);
+                        revealLyricsBlock(syncedLyricsContainer, plainLyricsContainer, () => {
+                            updateLyricsDisplay(currentTime, { initialReveal: true });
+                        });
                         if (lyricsContainer) {
                             lyricsContainer.classList.remove('no-lyrics');
                             lyricsContainer.classList.add('visible');
@@ -1609,7 +1589,7 @@ animateOutLyrics().then(() => {
                     // can legitimately lag behind the websocket/local progress path
                     // by a tick, and forcing that older value on first paint is what
                     // makes the initial line appear late until the next playback event.
-                    updateLyricsDisplay(currentTime);
+                    centerActiveLyricLineStrict(lastRenderedLyricIndex, lyricsContainer, { behavior: 'instant' });
 
                     if (setLastFetched) {
                         state.lastFetchedVideoId = state.currentVideoId;
