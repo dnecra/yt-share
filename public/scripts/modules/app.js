@@ -86,6 +86,8 @@ function extractPlaylistIdentity(item) {
 
 function extractAlbumIdentity(item) {
     const albumIdCandidates = [
+        item?.playlistId,
+        item?.id?.playlistId,
         item?.browseId,
         item?.id?.browseId,
         item?.albumId,
@@ -112,8 +114,7 @@ async function fetchCollectionVideoIds(id, kind) {
         throw new Error(data?.error || response.statusText || 'Collection request failed');
     }
 
-    const items = Array.isArray(data?.items) ? data.items : [];
-    const videoIds = items
+    const videoIds = (Array.isArray(data?.items) ? data.items : [])
         .map((item) => String(item?.videoId || '').trim())
         .filter(Boolean);
 
@@ -148,7 +149,7 @@ export async function addCollectionToQueue(id, kind = 'playlist', collectionTitl
         }
 
         if (successCount <= 0) {
-            throw new Error('Failed to add playlist tracks');
+            throw new Error('Failed to add collection tracks');
         }
 
         showToast(`${successCount} songs added from ${safeCollectionTitle}`);
@@ -210,27 +211,27 @@ function renderSearchResults(resultsDiv, items, options = {}) {
 
         const thumbnailUrl = getThumbnailUrl(originalThumbnailUrl) || originalThumbnailUrl || '/icons/album-cover-placeholder.png';
         let addButtonHtml = '';
-        if (videoId) {
-            addButtonHtml = `
-                <button class="search-results-button" onclick="window.addToQueueById('${escapeHtml(safeText(videoId))}')" title="Add to queue">
-                    <span class="material-icons">add</span>
-                </button>
-            `;
-        } else if (albumId) {
+        if (item?.type === 'albums' && albumId) {
             addButtonHtml = `
                 <button class="search-results-button" onclick="window.addCollectionToQueue('${escapeJsString(albumId)}', 'album', '${escapeJsString(safeText(title))}')" title="Add all songs from album">
                     <span class="material-icons">album</span>
                 </button>
             `;
-        } else if (playlistId) {
+        } else if (item?.type === 'community_playlists' && playlistId) {
             addButtonHtml = `
                 <button class="search-results-button" onclick="window.addCollectionToQueue('${escapeJsString(playlistId)}', 'playlist', '${escapeJsString(safeText(title))}')" title="Add all songs from playlist">
                     <span class="material-icons">playlist_add</span>
                 </button>
             `;
+        } else if (videoId) {
+            addButtonHtml = `
+                <button class="search-results-button" onclick="window.addToQueueById('${escapeHtml(safeText(videoId))}')" title="Add to queue">
+                    <span class="material-icons">add</span>
+                </button>
+            `;
         } else {
             addButtonHtml = `
-                <button class="search-results-button" disabled title="No direct video or playlist to add">
+                <button class="search-results-button" disabled title="No direct video to add">
                     <span class="material-icons">remove</span>
                 </button>
             `;
