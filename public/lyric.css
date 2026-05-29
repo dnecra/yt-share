@@ -141,15 +141,6 @@ html {
   
 }
 
-.lyric-line.leaving-current {
-  color: var(--lyrics-active-color);
-  font-weight: var(--lyrics-active-font-weight);
-  font-variation-settings: "wght" var(--lyrics-active-font-weight);
-  opacity: var(--lyrics-active-opacity);
-  filter: blur(0) brightness(var(--lyrics-active-brightness));
-  text-shadow: none;
-}
-
 .lyric-line.music-note-line {
   font-size: calc(var(--lyric-font-size, 27px) * 0.5);
   line-height: calc(var(--lyric-line-height-actual) - var(--lyric-wrap-line-height-reduction, 0px));
@@ -391,16 +382,6 @@ html {
   paint-order: stroke fill;
   opacity: var(--lyrics-active-opacity);
   animation: var(--lyrics-animations);
-}
-
-.lyric-line.leaving-current .lyric-word,
-.lyric-line.leaving-current .romanized-word,
-.lyric-line.leaving-current .translation-word {
-  -webkit-text-stroke-width: var(--lyrics-active-stroke-width);
-  -webkit-text-stroke-color: var(--lyrics-active-stroke-color);
-  paint-order: stroke fill;
-  opacity: var(--lyrics-active-opacity);
-  animation: none !important;
 }
 
 /* Plain (unsynced) lyrics: render every line as active style */

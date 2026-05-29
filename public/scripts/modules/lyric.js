@@ -12,7 +12,6 @@ let lyricLineElements = [];
 let lyricsRenderVersion = 0;
 let lastStableLyricEffectiveTime = null;
 let latchedBlankCutoffIndex = -1;
-let pendingLeavingCurrentAnimationFrame = 0;
 const LYRIC_DISPLAY_MODES = new Set(['scroll', 'fixed-3', 'fixed-2', 'fixed-1']);
 const LYRICS_CONTAINER_EXIT_DURATION_MS = 1000;
 let currentLyricDisplayMode = 'scroll';
@@ -178,13 +177,6 @@ function clearLyricLineElementsCache() {
     lyricLineElements = [];
 }
 
-function cancelPendingLeavingCurrentAnimation() {
-    if (pendingLeavingCurrentAnimationFrame) {
-        cancelAnimationFrame(pendingLeavingCurrentAnimationFrame);
-        pendingLeavingCurrentAnimationFrame = 0;
-    }
-}
-
 function clearScheduledFixedLineHide(line) {
     if (!line) return;
     const timerId = fixedLineHideTimers.get(line);
@@ -235,18 +227,6 @@ function scheduleFixedLineHide(line, delayMs = BLANK_CUTOFF_HIDE_DELAY_MS) {
         line.classList.remove('fixed-leaving');
     }, timeoutMs);
     fixedLineHideTimers.set(line, timerId);
-}
-
-function scheduleLeavingCurrentRelease(linesToRelease) {
-    if (!Array.isArray(linesToRelease) || linesToRelease.length === 0) return;
-    cancelPendingLeavingCurrentAnimation();
-    pendingLeavingCurrentAnimationFrame = requestAnimationFrame(() => {
-        pendingLeavingCurrentAnimationFrame = 0;
-        linesToRelease.forEach((line) => {
-            if (!line?.isConnected) return;
-            line.classList.remove('leaving-current');
-        });
-    });
 }
 
 function normalizeLyricDisplayMode(mode) {
@@ -942,13 +922,9 @@ export function updateLyricsDisplay(currentTime, options = {}) {
     const shouldApplyBlankCutoff = isBlankCutoffEnabledForCurrentPage() && activeBlankCutoffIndex >= 0;
 
     if (hasActiveLineChanged || hasExpandedModeChanged || hasDisplayModeChanged) {
-        const pendingLeavingCurrentLines = [];
-        const previousActiveIndex = Number.isFinite(lastRenderedLyricIndex) ? lastRenderedLyricIndex : -1;
-
         lines.forEach((line, index) => {
-            const wasCurrent = line.classList.contains('current');
             const shouldHideAfterBlank = shouldApplyBlankCutoff && index < activeBlankCutoffIndex;
-            line.classList.remove('current', 'previous', 'upcoming', 'before', 'after', 'far-before', 'far-after', 'activating-current');
+            line.classList.remove('current', 'previous', 'upcoming', 'before', 'after', 'far-before', 'far-after', 'activating-current', 'leaving-current');
             line.classList.remove('fixed-secondary');
             if (!shouldHideAfterBlank) {
                 line.classList.remove('hidden-after-blank');
@@ -970,17 +946,6 @@ export function updateLyricsDisplay(currentTime, options = {}) {
                         line.classList.add('activating-current');
                     }
                     applyActiveWordStagger(line);
-                }
-                line.classList.remove('leaving-current');
-            }
-
-            if (index !== currentIndex && shouldAnimateActiveLine && index === previousActiveIndex && wasCurrent) {
-                const shouldUseLeavingCurrent = !(displayMode === 'scroll' && shouldHideAfterBlank);
-                if (shouldUseLeavingCurrent) {
-                    line.classList.add('leaving-current');
-                    pendingLeavingCurrentLines.push(line);
-                } else {
-                    line.classList.remove('leaving-current');
                 }
             }
 
@@ -1023,8 +988,6 @@ export function updateLyricsDisplay(currentTime, options = {}) {
                 }
             }
         });
-
-        scheduleLeavingCurrentRelease(pendingLeavingCurrentLines);
 
         if (displayMode !== 'scroll') {
             reorderFixedModeVisibleLines(displayMode, currentIndex, lines);
@@ -1437,7 +1400,6 @@ animateOutLyrics().then(() => {
     lastRenderedLyricDisplayMode = null;
     lastStableLyricEffectiveTime = null;
     latchedBlankCutoffIndex = -1;
-    cancelPendingLeavingCurrentAnimation();
     cancelPendingLyricModeReveal();
 
     if (!isFetchStillValid() || !isRenderStillCurrent()) return;
@@ -1656,7 +1618,6 @@ export function hideLyricsUI({
     lastRenderedLyricDisplayMode = null;
     lastStableLyricEffectiveTime = null;
     latchedBlankCutoffIndex = -1;
-    cancelPendingLeavingCurrentAnimation();
     cancelPendingLyricModeReveal();
 
     try {
