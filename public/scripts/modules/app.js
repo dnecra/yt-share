@@ -7,6 +7,7 @@ import { showToast } from './ui.js';
 const SEARCH_TAB_CONFIG = {
     music: {
         type: 'song',
+        params: 'EgWKAQIIAWoKEAMQBBAJEAoQBQ==',
         resultContainerId: 'music-results',
         emptyText: 'No music found.',
         errorLabel: 'Music',
@@ -14,6 +15,7 @@ const SEARCH_TAB_CONFIG = {
     },
     videos: {
         type: 'videos',
+        params: 'EgWKAQIQAWoKEAMQBBAJEAoQBQ==',
         resultContainerId: 'videos-results',
         emptyText: 'No videos found.',
         errorLabel: 'Video',
@@ -21,6 +23,7 @@ const SEARCH_TAB_CONFIG = {
     },
     albums: {
         type: 'albums',
+        params: 'EgWKAQIYAWoKEAMQBBAJEAoQBQ==',
         resultContainerId: 'albums-results',
         emptyText: 'No albums found.',
         errorLabel: 'Album',
@@ -28,6 +31,7 @@ const SEARCH_TAB_CONFIG = {
     },
     'community-playlists': {
         type: 'community_playlists',
+        params: 'EgeKAQQoAEABagoQAxAEEAkQChAF',
         resultContainerId: 'community-playlists-results',
         emptyText: 'No playlists found.',
         errorLabel: 'Playlist',
@@ -293,28 +297,39 @@ function isSearchTabLoaded(query, tabName) {
     return loadedSearchTabsByQuery.get(normalizedQuery)?.has(tabName) === true;
 }
 
-async function searchRapidApiByType(query, type, resultContainerId, emptyText, errorLabel, requestToken = 0) {
+async function searchNativeApiByType(query, type, params, resultContainerId, emptyText, errorLabel, requestToken = 0) {
     const resultsDiv = document.getElementById(resultContainerId);
     if (!resultsDiv) return;
     const safeText = (v) => (v === null || v === undefined) ? '' : String(v);
 
     try {
-        const rapidResponse = await fetch(`${API_URL}/search?q=${encodeURIComponent(query)}&type=${encodeURIComponent(type)}`);
+        const searchResponse = await fetch(`${API_URL}/search`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                query,
+                type,
+                params: params || '',
+                continuation: ''
+            })
+        });
 
-        const rapidData = await fetchJsonSafe(rapidResponse);
-        if (!rapidResponse.ok || !rapidData?.success) {
+        const searchData = await fetchJsonSafe(searchResponse);
+        if (!searchResponse.ok || !searchData?.success) {
             const apiMsg =
-                rapidData?.error ||
-                rapidData?.message ||
-                rapidResponse.statusText ||
-                `HTTP ${rapidResponse.status}`;
+                searchData?.error ||
+                searchData?.message ||
+                searchResponse.statusText ||
+                `HTTP ${searchResponse.status}`;
             throw new Error(apiMsg);
         }
 
         if (requestToken && requestToken !== lastSearchRequestToken) {
             return;
         }
-        renderSearchResults(resultsDiv, rapidData?.result || rapidData?.items || [], { emptyText });
+        renderSearchResults(resultsDiv, searchData?.result || searchData?.items || [], { emptyText });
     } catch (error) {
         if (requestToken && requestToken !== lastSearchRequestToken) {
             return;
@@ -342,9 +357,10 @@ export async function loadSearchTab(tabName, query = activeSearchQuery, options 
 
     setSearchLoadingState(normalizedTab, config.loadingText);
 
-    const task = searchRapidApiByType(
+    const task = searchNativeApiByType(
         normalizedQuery,
         config.type,
+        config.params,
         config.resultContainerId,
         config.emptyText,
         config.errorLabel,
