@@ -1,11 +1,13 @@
 import { API_URL, state } from './config.js';
 import { getThumbnailUrl } from './connection.js';
-import { logMessage } from './utils.js';
+import { escapeHtml, escapeHtmlAttribute, logMessage } from './utils.js';
 import { updateNowPlayingHighlight } from './ui.js';
 
 const QUEUE_AUTOSCROLL_IDLE_MS = 1800;
 const QUEUE_AUTOSCROLL_ADD_DELAY_MS = 900;
 const QUEUE_AUTOSCROLL_SONG_DELAY_MS = 450;
+const QUEUE_FLAIRS = ['🔥', '🔄️', '👀', '✨', '👍', '💤', '⁉️', '👎', '🚫', '🗑️'];
+const recentlyAddedFlairs = new Map();
 let queueInteractionListenersAttached = false;
 
 function getEffectiveCurrentPlayingIndex(processedQueue = state.processedQueueData) {
@@ -217,6 +219,9 @@ export function processQueueItem(item, index) {
                 if (item._ipInfo) {
                     possibleSong._ipInfo = item._ipInfo;
                 }
+                if (item._flairs) {
+                    possibleSong._flairs = item._flairs;
+                }
                 return possibleSong;
             }
             
@@ -232,6 +237,9 @@ export function processQueueItem(item, index) {
             if (item._ipInfo) {
                 placeholder._ipInfo = item._ipInfo;
             }
+            if (item._flairs) {
+                placeholder._flairs = item._flairs;
+            }
             return placeholder;
         }
 
@@ -244,10 +252,13 @@ export function processQueueItem(item, index) {
         if (item._ipInfo) {
             song._ipInfo = item._ipInfo;
         }
+        if (item._flairs) {
+            song._flairs = item._flairs;
+        }
         if (item._isCurrentlyPlaying) {
             song._isCurrentlyPlaying = true;
         }
-        // Preserve YouTube's own `selected` flag — authoritative even with duplicate videoIds
+        // Preserve YouTube's own `selected` flag, authoritative even with duplicate videoIds.
         if (song.selected === true) {
             song._isCurrentlyPlaying = true;
         }
@@ -265,8 +276,54 @@ export function processQueueItem(item, index) {
         if (item._ipInfo) {
             placeholder._ipInfo = item._ipInfo;
         }
+        if (item._flairs) {
+            placeholder._flairs = item._flairs;
+        }
         return placeholder;
     }
+}
+
+function createFlairPanelHtml(song) {
+    const flairs = Array.isArray(song._flairs) ? song._flairs : [];
+    const hasFlairs = flairs.length > 0;
+    const recentFlair = recentlyAddedFlairs.get(song.videoId);
+    let recentFlairMatched = false;
+    const flairChips = flairs.map(flair => {
+        const displayName = flair.displayName || flair.ip || 'Unknown';
+        const flairUpdatedAt = Number(flair.updatedAt) || 0;
+        const isRecentlyAdded = !recentFlairMatched &&
+            recentFlair &&
+            flair.emoji === recentFlair.emoji &&
+            (
+                (recentFlair.updatedAt && Math.abs(flairUpdatedAt - recentFlair.updatedAt) < 5000) ||
+                (!recentFlair.updatedAt && flairUpdatedAt >= recentFlair.requestedAt - 2000)
+            );
+        if (isRecentlyAdded) {
+            recentFlairMatched = true;
+        }
+        return `<button class="queue-flair-chip ${isRecentlyAdded ? 'newly-added' : ''}" type="button" title="Added by ${escapeHtmlAttribute(displayName)}" aria-label="Flair ${escapeHtmlAttribute(flair.emoji)} added by ${escapeHtmlAttribute(displayName)}">${escapeHtml(flair.emoji)}</button>`;
+    }).join('');
+    if (recentFlairMatched) {
+        recentlyAddedFlairs.delete(song.videoId);
+    }
+    const flairButtons = QUEUE_FLAIRS.map(emoji => {
+        return `<button class="queue-flair-option" type="button" data-flair="${escapeHtmlAttribute(emoji)}" aria-label="Add ${escapeHtmlAttribute(emoji)} flair">${escapeHtml(emoji)}</button>`;
+    }).join('');
+    const addButton = hasFlairs
+        ? ''
+        : `<button class="queue-flair-add" type="button" title="Add flair" aria-label="Add flair">
+                <span class="material-icons">add_reaction</span>
+            </button>`;
+
+    return `
+        <div class="queue-flair-panel ${hasFlairs ? 'has-flairs' : ''}">
+            ${addButton}
+            <div class="queue-flair-list">${flairChips}</div>
+            <div class="queue-flair-picker" role="menu" aria-label="Choose flair">
+                ${flairButtons}
+            </div>
+        </div>
+    `;
 }
 
 // Create song element for queue
@@ -283,8 +340,8 @@ export function createSongElement(song, index, handlers = {}) {
         div.classList.add('newly-added');
     }
 
-    const isUnavailable = song.unavailable || 
-                         song.shortBylineText?.runs?.[0]?.text === 'Video unavailable' || 
+    const isUnavailable = song.unavailable ||
+                         song.shortBylineText?.runs?.[0]?.text === 'Video unavailable' ||
                          song.title?.accessibility?.accessibilityData?.label === 'Video unavailable';
 
     const isCurrent = (Number.isInteger(state.currentPlayingIndex) && state.currentPlayingIndex === index) || song._isCurrentlyPlaying === true;
@@ -296,7 +353,6 @@ export function createSongElement(song, index, handlers = {}) {
         div.draggable = true;
     }
 
-    // Drag handlers
     if (handlers.onDragStart) div.addEventListener('dragstart', handlers.onDragStart);
     if (handlers.onDragEnd) div.addEventListener('dragend', handlers.onDragEnd);
     if (handlers.onDragOver) div.addEventListener('dragover', handlers.onDragOver);
@@ -304,7 +360,6 @@ export function createSongElement(song, index, handlers = {}) {
     if (handlers.onDragLeave) div.addEventListener('dragleave', handlers.onDragLeave);
     if (handlers.onDrop) div.addEventListener('drop', handlers.onDrop);
 
-    // Click handler
     if (handlers.onClick) {
         div.addEventListener('click', (e) => handlers.onClick(e, div, index, isUnavailable));
     }
@@ -312,30 +367,34 @@ export function createSongElement(song, index, handlers = {}) {
     const titleText = song.title?.runs?.[0]?.text || (typeof song.title === 'string' ? song.title : 'Unavailable Video');
     const artistText = song.longBylineText?.runs?.[0]?.text || '';
     const albumText = song.longBylineText?.runs?.[2]?.text || '';
-    const originalThumbnailUrl = song.thumbnail?.thumbnails?.[0]?.url?.startsWith('http') 
-        ? song.thumbnail.thumbnails[0].url 
+    const originalThumbnailUrl = song.thumbnail?.thumbnails?.[0]?.url?.startsWith('http')
+        ? song.thumbnail.thumbnails[0].url
         : (song.thumbnail?.thumbnails?.[0]?.url ? `https:${song.thumbnail.thumbnails[0].url}` : 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjgiIGhlaWdodD0iMTI4IiB2aWV3Qm94PSIwIDAgMjQgMjQiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2ZkMDIzNCIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTE4IDZMNiAxOE0xOCAxOEw2IDZNMTIgMkE1IDUgMCAwIDAgMyAxMkE1IDUgMCAwIDAgMTIgMjJBNSA1IDAgMCAwIDIxIDEyQTUgNSAwIDAgMCAxMiAyeiI+PC9wYXRoPjwvc3ZnPg==');
     const thumbnailUrl = getThumbnailUrl(originalThumbnailUrl);
 
     const ipInfo = song._ipInfo;
     const ipAddress = ipInfo?.ip || null;
     const displayText = ipInfo?.hostname || ipAddress || '';
-    const ipDisplay = displayText ? `<span class="ip-address" title="Added by ${ipAddress || displayText}">${displayText}</span>` : '';
+    const ipDisplay = displayText ? `<span class="ip-address" title="Added by ${escapeHtmlAttribute(ipAddress || displayText)}">${escapeHtml(displayText)}</span>` : '';
+    const artistAlbumText = `${artistText}${albumText ? ` • ${albumText}` : ''}`;
 
     div.innerHTML = `
         <span class="queue-number">${index + 1}</span>
-        <img class="thumbnail" src="${thumbnailUrl}" alt="${titleText}">
+        <img class="thumbnail" src="${escapeHtmlAttribute(thumbnailUrl)}" alt="${escapeHtmlAttribute(titleText)}">
         <div class="details">
-            <div class="title">${isUnavailable ? '<span class="unavailable-label">Unavailable</span> ' : ''}${titleText}</div>
-            <div class="artist-album">${artistText}${albumText ? ` • ${albumText}` : ''}</div>
+            <div class="title">${isUnavailable ? '<span class="unavailable-label">Unavailable</span> ' : ''}${escapeHtml(titleText)}</div>
+            <div class="artist-album">${escapeHtml(artistAlbumText)}</div>
         </div>
-        ${ipDisplay}
+        <div class="queue-meta">
+            ${ipDisplay}
+            ${createFlairPanelHtml(song)}
+        </div>
         <div class="move-controls ${(isCurrent || isUnavailable) ? 'hidden' : ''}">
-            <button class="control-button move-button" onclick="moveSongInQueue(${index}, 'up')" 
+            <button class="control-button move-button" onclick="moveSongInQueue(${index}, 'up')"
                     ${index === 0 ? 'disabled' : ''}>
                 <span class="material-icons">arrow_upward</span>
             </button>
-            <button class="control-button move-button" onclick="moveSongInQueue(${index}, 'down')" 
+            <button class="control-button move-button" onclick="moveSongInQueue(${index}, 'down')"
                     ${index === state.processedQueueData.length - 1 ? 'disabled' : ''}>
                 <span class="material-icons">arrow_downward</span>
             </button>
@@ -346,16 +405,81 @@ export function createSongElement(song, index, handlers = {}) {
         <button class="control-button delete-button ${isCurrent ? 'hidden' : ''}" onclick="deleteSongFromQueue(${index})">
                 <span class="material-icons">close</span>
         </button>
-        ${isCurrent ?
-            '<span class="loader"></span>' :
-            ''
-            }
+        ${isCurrent ? '<span class="loader"></span>' : ''}
     `;
+
+    div.querySelector('.queue-flair-add')?.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        div.querySelector('.queue-flair-panel')?.classList.toggle('picker-open');
+    });
+
+    div.querySelectorAll('.queue-flair-option').forEach(button => {
+        button.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            await setQueueFlair(song.videoId, button.dataset.flair, div);
+        });
+    });
+
+    div.querySelectorAll('.queue-flair-chip').forEach(button => {
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            div.querySelector('.queue-flair-panel')?.classList.toggle('picker-open');
+        });
+    });
 
     return div;
 }
-
 // Queue API operations
+export async function setQueueFlair(videoId, emoji, songElement = null) {
+    if (!videoId || !emoji) return false;
+
+    try {
+        if (songElement) {
+            songElement.classList.add('flair-sending');
+            songElement.querySelector('.queue-flair-panel')?.classList.remove('picker-open');
+        }
+        recentlyAddedFlairs.set(videoId, {
+            emoji,
+            updatedAt: null,
+            requestedAt: Date.now()
+        });
+
+        const response = await fetch(`${API_URL}/queue/flair`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ videoId, emoji })
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: 'Unknown flair error' }));
+            throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json().catch(() => null);
+        const updatedAt = Number(result?.flair?.updatedAt) || null;
+        if (result?.removed) {
+            recentlyAddedFlairs.delete(videoId);
+        } else if (updatedAt && recentlyAddedFlairs.has(videoId)) {
+            recentlyAddedFlairs.set(videoId, { emoji, updatedAt });
+        }
+
+        if (songElement) {
+            songElement.classList.remove('flair-sending');
+        }
+        return true;
+    } catch (error) {
+        recentlyAddedFlairs.delete(videoId);
+        if (songElement) songElement.classList.remove('flair-sending');
+        if (logMessage) logMessage(`Error setting flair: ${error.message}`);
+        return false;
+    }
+}
+
 export async function deleteSongFromQueue(index) {
     try {
         if (logMessage) logMessage(`Deleting song at index ${index}`);
@@ -538,7 +662,7 @@ export async function addToQueue(videoId) {
         }
 
         if (logMessage) {
-            logMessage('✓ Song added to queue!');
+            logMessage('âœ“ Song added to queue!');
             const logDiv = document.getElementById('log');
             if (logDiv) {
                 logDiv.style.color = '#4caf50';
@@ -595,7 +719,8 @@ export function renderQueue() {
         onClick: async (e, div, index, isUnavailable) => {
             if (!e.target.closest('.move-controls') && 
                 !e.target.closest('.play-next-button') && 
-                !e.target.closest('.delete-button')) {
+                !e.target.closest('.delete-button') &&
+                !e.target.closest('.queue-flair-panel')) {
                 if (isUnavailable) {
                     logMessage("This video is unavailable");
                     return;

@@ -140,3 +140,5 @@ dist
 .pnp.*
 bundle.js
 bundle.js
+queue-flairs.json
+bundle.js

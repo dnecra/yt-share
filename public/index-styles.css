@@ -69,7 +69,7 @@
             display: flex;
             flex-direction: column;
             height: 100vh;
-            overflow: hidden;
+            overflow: visible;
             width: 100%;
             max-width: 100%;
             margin: 0;
@@ -152,7 +152,7 @@
         .song {
             display: flex;
             align-items: center;
-            padding: 12px 12px ;
+            padding: 12px 12px;
             border-radius: 6px;
             background-color: rgba(65, 65, 65, 0.2);
             margin-bottom: 12px;
@@ -267,12 +267,11 @@
         }
 
         .ip-address {
-            color: var(--text-secondary);
+            color: var(--text-primary);
             font-size: 11px;
             font-family: 'JetBrains Mono', monospace;
-            margin-left: auto;
-            margin-right: 12px;
-            padding: 4px 8px;
+            margin: 0;
+            padding: 2px 8px 3px 8px;
             background-color: rgba(255, 255, 255, 0.05);
             border-radius: 4px;
             opacity: 0.7;
@@ -282,6 +281,177 @@
 
         .song:hover .ip-address {
             opacity: 1;
+        }
+
+        .queue-meta {
+            margin-left: auto;
+            margin-right: 0;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: center;
+            align-self: center;
+            gap: 6px;
+            min-width: 40px;
+            max-width: 340px;
+            position: relative;
+            z-index: 5;
+        }
+
+        .queue-flair-panel {
+            position: relative;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 4px;
+        }
+
+        .queue-flair-add {
+            width: 30px;
+            height: 30px;
+            border: 0;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-secondary);
+            background: rgba(255, 255, 255, 0.04);
+            opacity: 0.34;
+            cursor: pointer;
+            transition: opacity 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
+        }
+
+        .queue-flair-add .material-icons {
+            font-size: 18px;
+        }
+
+        .song:hover .queue-flair-add,
+        .queue-flair-panel.picker-open .queue-flair-add {
+            opacity: 0.88;
+        }
+
+        .queue-flair-add:hover {
+            background: rgba(255, 255, 255, 0.12);
+            transform: rotate(-8deg) scale(1.08);
+        }
+
+        .queue-flair-list {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 4px;
+            max-width: 250px;
+            min-height: 0;
+        }
+
+        .queue-flair-chip {
+            width: 38px;
+            height: 38px;
+            border: 0;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at 35% 25%, rgba(255, 255, 255, 0.28), rgba(255, 255, 255, 0.07));
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+            cursor: pointer;
+            font-size: 23px;
+            line-height: 1;
+        }
+
+        .queue-flair-chip:hover {
+            transform: translateY(-2px) rotate(-5deg) scale(1.12);
+            filter: saturate(1.35);
+        }
+
+        .queue-flair-chip.newly-added {
+            animation: flairConfettiPop 0.65s cubic-bezier(0.18, 1.35, 0.28, 1);
+        }
+
+        .queue-flair-picker {
+            position: absolute;
+            top: 50%;
+            right: calc(100% + 6px);
+            display: grid;
+            grid-template-columns: repeat(10, 30px);
+            gap: 5px;
+            padding: 7px;
+            border-radius: 999px;
+            background: rgba(18, 18, 18, 0.96);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 16px 32px rgba(0, 0, 0, 0.45);
+            opacity: 0;
+            pointer-events: none;
+            transform: translateY(-50%) translateX(8px) scale(0.92);
+            transform-origin: center right;
+            transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.2, 1.4, 0.3, 1);
+            z-index: 20;
+        }
+
+        .queue-flair-panel.picker-open .queue-flair-picker {
+            opacity: 1;
+            pointer-events: auto;
+            transform: translateY(-50%) translateX(0) scale(1);
+        }
+
+        .queue-flair-option {
+            width: 30px;
+            height: 30px;
+            border: 0;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.07);
+            cursor: pointer;
+            font-size: 17px;
+            line-height: 1;
+            transition: transform 0.16s ease, background-color 0.16s ease;
+        }
+
+        .queue-flair-option:hover {
+            background: rgba(255, 255, 255, 0.18);
+            transform: translateY(-3px) rotate(-8deg) scale(1.22);
+        }
+
+        .song.flair-sending .queue-flair-add {
+            animation: flairWiggle 0.42s ease-in-out infinite;
+        }
+
+        @keyframes flairBounceIn {
+            0% {
+                opacity: 0;
+                transform: translateY(-8px) scale(0.35) rotate(-18deg);
+            }
+            65% {
+                opacity: 1;
+                transform: translateY(2px) scale(1.2) rotate(8deg);
+            }
+            100% {
+                transform: translateY(0) scale(1) rotate(0deg);
+            }
+        }
+
+        @keyframes flairWiggle {
+            0%, 100% {
+                transform: rotate(-8deg) scale(1);
+            }
+            50% {
+                transform: rotate(10deg) scale(1.08);
+            }
+        }
+
+        @keyframes flairConfettiPop {
+            0% {
+                transform: scale(0.5) rotate(-20deg);
+                filter: saturate(1);
+            }
+            45% {
+                transform: scale(1.35) rotate(14deg);
+                filter: saturate(1.7);
+            }
+            100% {
+                transform: scale(1) rotate(0deg);
+                filter: saturate(1);
+            }
         }
 
         .queue-number {
@@ -1741,8 +1911,8 @@
             /* Make IP address smaller on mobile */
             .ip-address {
                 font-size: 9px !important;
-                padding: 2px 6px !important;
-                margin-right: 8px !important;
+                padding: 0 6px 2px !important;
+                margin: 0 !important;
             }
             #popout-button {
                 display: none !important;

@@ -53,6 +53,7 @@ const {
     fetchLyricsCandidate
 } = require('./lib/lyrics');
 const { fetchImage } = require('./lib/image-proxy');
+const { setFlairForVideo, ALLOWED_FLAIRS } = require('./lib/flair-manager');
 // Floating Lyrics process detection/control is handled server-side (local machine).
 const { startPolling } = require('./lib/polling');
 const { setupRoutes } = require('./lib/routes');
@@ -92,6 +93,8 @@ setupRoutes(app, {
     fetchLyrics,
     fetchLyricsCandidate,
     fetchImage,
+    setFlairForVideo,
+    ALLOWED_FLAIRS,
     QUEUE_CACHE_TTL,
     VIDEO_ID_IP_MAP_MAX_SIZE
 });
