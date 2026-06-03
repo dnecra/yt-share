@@ -211,6 +211,19 @@
             border-color: var(--border-color);
         }
 
+        .song.search-result-locked {
+            border-color: rgba(255, 196, 0, 0.5);
+            background:
+                linear-gradient(90deg, rgba(255, 196, 0, 0.12), rgba(253, 2, 52, 0.08)),
+                rgba(65, 65, 65, 0.24);
+            cursor: not-allowed;
+        }
+
+        .song.search-result-locked:hover {
+            transform: translateX(2px) rotate(-0.25deg);
+            border-color: rgba(255, 196, 0, 0.8);
+        }
+
         .song.current {
             background-color: var(--bg-lighter);
         }
@@ -242,6 +255,15 @@
             color: var(--text-secondary);
             font-size: 14px;
             font-weight: 600;
+        }
+
+        .search-lock-message {
+            color: #ffc400;
+            font-size: 11px;
+            font-weight: 800;
+            white-space: normal;
+            line-height: 1.25;
+            margin-top: 4px;
         }
 
         .ip-address {
@@ -634,6 +656,16 @@
         .search-results-button:hover {
             background-color: #ff1744;
             transform: translateY(-1px);
+        }
+
+        .search-results-button.locked-search-button {
+            background-color: #ffc400;
+            color: #16110a;
+        }
+
+        .search-results-button.locked-search-button:hover {
+            background-color: #ffd84f;
+            transform: translateY(-1px) rotate(-4deg);
         }
 
         .volume-control {

@@ -51,7 +51,7 @@ const MANUAL_LYRIC_THEME_COLORS = [
     { name: 'Green', hex: '8fc04f' },
     { name: 'Blue', hex: '30bdd5' },
     { name: 'Yellow', hex: 'f5f07c' },
-    { name: 'Orange', hex: 'fbbf1f' },
+    { name: 'Orange', hex: 'cf4307' },
     { name: 'Purple', hex: 'c09ccb' }
 ];
 let currentManualLyricThemeColorIndex = 0;

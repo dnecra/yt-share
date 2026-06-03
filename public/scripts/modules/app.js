@@ -43,6 +43,8 @@ let activeSearchQuery = '';
 let lastSearchRequestToken = 0;
 const loadedSearchTabsByQuery = new Map();
 const inFlightSearchTabs = new Map();
+let blockedSearchKeywordsCache = null;
+const BLOCKED_SEARCH_UNLOCK_MESSAGE = 'Pay admin USD 1 (Rp. 17.945) to unlock and add this song.';
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -61,6 +63,38 @@ function escapeJsString(value) {
     return String(value ?? '')
         .replace(/\\/g, '\\\\')
         .replace(/'/g, "\\'");
+}
+
+async function getBlockedSearchKeywords() {
+    if (Array.isArray(blockedSearchKeywordsCache)) {
+        return blockedSearchKeywordsCache;
+    }
+
+    try {
+        const response = await fetch(`${API_URL}/blocked-search-keywords`, { cache: 'no-store' });
+        const data = await fetchJsonSafe(response);
+        if (!response.ok || !data?.success) {
+            throw new Error(data?.error || response.statusText || 'Keyword list unavailable');
+        }
+        blockedSearchKeywordsCache = (Array.isArray(data?.keywords) ? data.keywords : [])
+            .map((keyword) => String(keyword || '').trim().toLowerCase())
+            .filter(Boolean);
+    } catch (error) {
+        blockedSearchKeywordsCache = [];
+        if (logMessage) logMessage(`Search blocklist unavailable: ${error?.message || error}`);
+    }
+
+    return blockedSearchKeywordsCache;
+}
+
+function normalizeSearchLockText(value) {
+    return String(value || '').toLowerCase();
+}
+
+function getMatchingBlockedKeyword(text, keywords) {
+    const normalizedText = normalizeSearchLockText(text);
+    return (Array.isArray(keywords) ? keywords : [])
+        .find((keyword) => keyword && normalizedText.includes(keyword)) || '';
 }
 
 function extractPlaylistIdentity(item) {
@@ -164,7 +198,8 @@ export async function addCollectionToQueue(id, kind = 'playlist', collectionTitl
 
 function renderSearchResults(resultsDiv, items, options = {}) {
     if (!resultsDiv) return;
-    const { emptyText = 'No results found.' } = options;
+    const { emptyText = 'No results found.', blockedKeywords = [] } = options;
+    const normalizedBlockedKeywords = Array.isArray(blockedKeywords) ? blockedKeywords : [];
 
     const safeText = (v) => (v === null || v === undefined) ? '' : String(v);
     resultsDiv.innerHTML = '';
@@ -200,6 +235,14 @@ function renderSearchResults(resultsDiv, items, options = {}) {
         ].map((part) => safeText(part).trim()).filter(Boolean);
 
         const subtitle = subtitleParts[0] || 'Unknown artist';
+        const lockSearchText = [
+            title,
+            subtitle,
+            item?.description,
+            item?.snippet?.description
+        ].map((part) => safeText(part)).join(' ');
+        const matchedBlockedKeyword = getMatchingBlockedKeyword(lockSearchText, normalizedBlockedKeywords);
+        const isLockedSearchResult = Boolean(matchedBlockedKeyword);
 
         const originalThumbnailUrl =
             item?.snippet?.thumbnails?.high?.url ||
@@ -211,7 +254,13 @@ function renderSearchResults(resultsDiv, items, options = {}) {
 
         const thumbnailUrl = getThumbnailUrl(originalThumbnailUrl) || originalThumbnailUrl || '/icons/album-cover-placeholder.png';
         let addButtonHtml = '';
-        if (item?.type === 'albums' && albumId) {
+        if (isLockedSearchResult) {
+            addButtonHtml = `
+                <button class="search-results-button locked-search-button" onclick="window.showBlockedSearchMessage('${escapeJsString(matchedBlockedKeyword)}')" title="${escapeHtml(BLOCKED_SEARCH_UNLOCK_MESSAGE)}">
+                    <span class="material-icons">lock</span>
+                </button>
+            `;
+        } else if (item?.type === 'albums' && albumId) {
             addButtonHtml = `
                 <button class="search-results-button" onclick="window.addCollectionToQueue('${escapeJsString(albumId)}', 'album', '${escapeJsString(safeText(title))}')" title="Add all songs from album">
                     <span class="material-icons">album</span>
@@ -238,12 +287,13 @@ function renderSearchResults(resultsDiv, items, options = {}) {
         }
 
         const div = document.createElement('div');
-        div.className = 'song';
+        div.className = `song${isLockedSearchResult ? ' search-result-locked' : ''}`;
         div.innerHTML = `
             <img class="thumbnail" src="${escapeHtml(thumbnailUrl)}" alt="${escapeHtml(safeText(title))}">
             <div class="details">
                 <div class="title">${escapeHtml(safeText(title))}</div>
                 <div class="artist-album">${escapeHtml(subtitle)}</div>
+                ${isLockedSearchResult ? `<div class="search-lock-message">${escapeHtml(BLOCKED_SEARCH_UNLOCK_MESSAGE)}</div>` : ''}
             </div>
             ${addButtonHtml}
         `;
@@ -304,6 +354,11 @@ async function searchNativeApiByType(query, type, params, resultContainerId, emp
     const safeText = (v) => (v === null || v === undefined) ? '' : String(v);
 
     try {
+        const blockedKeywords = await getBlockedSearchKeywords();
+        if (requestToken && requestToken !== lastSearchRequestToken) {
+            return;
+        }
+
         const searchResponse = await fetch(`${API_URL}/search`, {
             method: 'POST',
             headers: {
@@ -330,7 +385,10 @@ async function searchNativeApiByType(query, type, params, resultContainerId, emp
         if (requestToken && requestToken !== lastSearchRequestToken) {
             return;
         }
-        renderSearchResults(resultsDiv, searchData?.result || searchData?.items || [], { emptyText });
+        renderSearchResults(resultsDiv, searchData?.result || searchData?.items || [], {
+            emptyText,
+            blockedKeywords
+        });
     } catch (error) {
         if (requestToken && requestToken !== lastSearchRequestToken) {
             return;

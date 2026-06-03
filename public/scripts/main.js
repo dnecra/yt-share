@@ -52,7 +52,7 @@ const MAIN_LYRIC_COLOR_PRESETS = [
     { name: 'Green', hex: '#8fc04f' },
     { name: 'Blue', hex: '#30bdd5' },
     { name: 'Yellow', hex: '#f5f07c' },
-    { name: 'Orange', hex: '#fbbf1f' }
+    { name: 'Orange', hex: '#cf4307' }
 ];
 let mainLyricsFontSizePx = null;
 let mainLyricsRecenterRaf = null;
@@ -653,6 +653,9 @@ window.addToQueueById = (videoId) => {
     addToQueue(videoId).then(success => {
         if (success) showToast('Song added to queue');
     });
+};
+window.showBlockedSearchMessage = () => {
+    showToast('Pay admin USD 1 (Rp. 17.945) to unlock and add this song.');
 };
 window.addCollectionToQueue = addCollectionToQueue;
 window.loadSearchTab = loadSearchTab;
