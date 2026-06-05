@@ -2,13 +2,393 @@ import { API_URL, state } from './config.js';
 import { getThumbnailUrl } from './connection.js';
 import { escapeHtml, escapeHtmlAttribute, logMessage } from './utils.js';
 import { updateNowPlayingHighlight } from './ui.js';
+import '/vendor/emoji-picker-element/index.js';
 
 const QUEUE_AUTOSCROLL_IDLE_MS = 1800;
 const QUEUE_AUTOSCROLL_ADD_DELAY_MS = 900;
 const QUEUE_AUTOSCROLL_SONG_DELAY_MS = 450;
-const QUEUE_FLAIRS = ['🔥', '🔄️', '👀', '✨', '👍', '💤', '⁉️', '👎', '🚫', '🗑️'];
+const FLAIR_PICKER_MARGIN = 12;
+const FLAIR_REACTION_WIDTH = 496;
+const FLAIR_REACTION_HEIGHT = 56;
+const FLAIR_EXPANDED_WIDTH = 330;
+const FLAIR_EXPANDED_HEIGHT = 390;
+const FLAIR_EMOJI_DATA_SOURCE = '/vendor/emoji-picker-element-data/en/emojibase/data.json?v=20260605';
+const FLAIR_USAGE_STORAGE_KEY = 'queueFlairUsage:v1';
+const FLAIR_HOVER_CLOSE_DELAY_MS = 180;
+const FLAIR_EXPANDED_HOVER_CLOSE_GRACE_MS = 320;
+const flairEmojiSegmenter = typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+    : null;
+const QUICK_REACTION_FLAIRS = ['🔥', '🔄️', '👀', '✨', '👍', '💤', '⁉️', '👎', '🚫', '🗑️'];
 const recentlyAddedFlairs = new Map();
 let queueInteractionListenersAttached = false;
+let activeFlairSongElement = null;
+let activeFlairVideoId = null;
+let activeFlairAnchor = null;
+let activeFlairAnchorRect = null;
+let activeFlairExpansionRect = null;
+let floatingFlairPicker = null;
+let floatingEmojiPicker = null;
+let floatingFlairExpanded = false;
+let flairHoverCloseTimer = null;
+let expandedHoverCloseAllowedAt = 0;
+let lastFlairPointerX = null;
+let lastFlairPointerY = null;
+
+function normalizeFlairEmoji(emoji) {
+    return typeof emoji === 'string' ? emoji.trim() : '';
+}
+
+function splitFlairGraphemes(value) {
+    if (!value) return [];
+    if (flairEmojiSegmenter) {
+        return Array.from(flairEmojiSegmenter.segment(value), part => part.segment);
+    }
+    return Array.from(value);
+}
+
+function isValidFlairEmoji(emoji) {
+    const normalized = normalizeFlairEmoji(emoji);
+    if (!normalized || normalized.length > 32) return false;
+
+    const graphemes = splitFlairGraphemes(normalized);
+    if (graphemes.length !== 1 || graphemes[0] !== normalized) return false;
+
+    return /\p{Extended_Pictographic}|\p{Emoji_Presentation}|\p{Regional_Indicator}|[#*0-9]\ufe0f?\u20e3/u.test(normalized);
+}
+
+function getStoredFlairUsage() {
+    try {
+        const raw = localStorage.getItem(FLAIR_USAGE_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (_) {
+        return {};
+    }
+}
+
+function getQuickReactionFlairs() {
+    return QUICK_REACTION_FLAIRS;
+}
+
+function recordFlairUsage(emoji) {
+    const normalizedEmoji = normalizeFlairEmoji(emoji);
+    if (!isValidFlairEmoji(normalizedEmoji)) return;
+
+    const usage = getStoredFlairUsage();
+    const existing = usage[normalizedEmoji] || {};
+    usage[normalizedEmoji] = {
+        count: (Number(existing.count) || 0) + 1,
+        lastUsed: Date.now()
+    };
+
+    try {
+        localStorage.setItem(FLAIR_USAGE_STORAGE_KEY, JSON.stringify(usage));
+    } catch (_) {
+        // ignore storage failures
+    }
+}
+
+function cancelFlairHoverClose() {
+    if (flairHoverCloseTimer) {
+        clearTimeout(flairHoverCloseTimer);
+        flairHoverCloseTimer = null;
+    }
+}
+
+function rememberFlairPointerPosition(event) {
+    if (typeof event?.clientX !== 'number' || typeof event?.clientY !== 'number') return;
+    lastFlairPointerX = event.clientX;
+    lastFlairPointerY = event.clientY;
+}
+
+function isPointerOverFloatingFlairPicker() {
+    if (!floatingFlairPicker || lastFlairPointerX === null || lastFlairPointerY === null) return false;
+    const element = document.elementFromPoint(lastFlairPointerX, lastFlairPointerY);
+    return Boolean(element && floatingFlairPicker.contains(element));
+}
+
+function scheduleFlairHoverClose() {
+    cancelFlairHoverClose();
+    const delay = floatingFlairExpanded
+        ? Math.max(FLAIR_HOVER_CLOSE_DELAY_MS, expandedHoverCloseAllowedAt - Date.now())
+        : FLAIR_HOVER_CLOSE_DELAY_MS;
+    flairHoverCloseTimer = setTimeout(() => {
+        flairHoverCloseTimer = null;
+        if (floatingFlairExpanded && isPointerOverFloatingFlairPicker()) return;
+        closeFloatingFlairPicker();
+    }, delay);
+}
+
+function closeFloatingFlairPicker() {
+    document.querySelectorAll('.queue-flair-panel.picker-open').forEach(panel => {
+        panel.classList.remove('picker-open');
+    });
+
+    if (floatingFlairPicker) {
+        floatingFlairPicker.classList.remove('picker-open', 'is-positioned', 'expanded', 'reaction-mode');
+        floatingFlairPicker.style.left = '';
+        floatingFlairPicker.style.top = '';
+    }
+
+    cancelFlairHoverClose();
+    activeFlairSongElement = null;
+    activeFlairVideoId = null;
+    activeFlairAnchor = null;
+    activeFlairAnchorRect = null;
+    activeFlairExpansionRect = null;
+    floatingFlairExpanded = false;
+    expandedHoverCloseAllowedAt = 0;
+    lastFlairPointerX = null;
+    lastFlairPointerY = null;
+}
+
+function positionFloatingFlairPicker() {
+    if (!floatingFlairPicker || !activeFlairAnchor) return;
+    if (!activeFlairAnchor.isConnected) {
+        closeFloatingFlairPicker();
+        return;
+    }
+
+    const margin = FLAIR_PICKER_MARGIN;
+    const anchorRect = floatingFlairExpanded
+        ? activeFlairExpansionRect || activeFlairAnchorRect || activeFlairAnchor.getBoundingClientRect()
+        : activeFlairAnchorRect || activeFlairAnchor.getBoundingClientRect();
+    const visualViewport = window.visualViewport;
+    const viewportLeft = visualViewport?.offsetLeft || 0;
+    const viewportTop = visualViewport?.offsetTop || 0;
+    const viewportWidth = visualViewport?.width || window.innerWidth || document.documentElement.clientWidth;
+    const viewportHeight = visualViewport?.height || window.innerHeight || document.documentElement.clientHeight;
+    const viewportRight = viewportLeft + viewportWidth;
+    const viewportBottom = viewportTop + viewportHeight;
+    const availableWidth = viewportWidth - margin * 2;
+    const availableHeight = viewportHeight - margin * 2;
+    const targetWidth = floatingFlairExpanded ? FLAIR_EXPANDED_WIDTH : FLAIR_REACTION_WIDTH;
+    const targetHeight = floatingFlairExpanded ? FLAIR_EXPANDED_HEIGHT : FLAIR_REACTION_HEIGHT;
+    const minPickerWidth = floatingFlairExpanded ? 280 : 52;
+    const pickerWidth = Math.max(minPickerWidth, Math.min(targetWidth, availableWidth));
+    const pickerHeight = Math.max(FLAIR_REACTION_HEIGHT, Math.min(targetHeight, availableHeight));
+
+    floatingFlairPicker.style.width = `${pickerWidth}px`;
+    floatingFlairPicker.style.height = `${pickerHeight}px`;
+
+    let left;
+    let top;
+
+    if (floatingFlairExpanded) {
+        left = anchorRect.right - pickerWidth;
+        if (left + pickerWidth > viewportRight - margin) {
+            left = Math.max(viewportLeft + margin, viewportRight - pickerWidth - margin);
+        }
+        if (left < viewportLeft + margin) {
+            left = viewportLeft + margin;
+        }
+
+        top = anchorRect.top;
+        if (top + pickerHeight > viewportBottom - margin) {
+            top = viewportBottom - pickerHeight - margin;
+        }
+        if (top < viewportTop + margin) {
+            top = viewportTop + margin;
+        }
+    } else {
+        const expandButton = floatingFlairPicker.querySelector('.queue-reaction-expand');
+        const expandCenterOffset = expandButton
+            ? expandButton.offsetLeft + expandButton.offsetWidth / 2
+            : pickerWidth - 28;
+        left = anchorRect.left + anchorRect.width / 2 - expandCenterOffset;
+        if (left < viewportLeft + margin) {
+            left = viewportLeft + margin;
+        }
+        if (left + pickerWidth > viewportRight - margin) {
+            left = viewportRight - pickerWidth - margin;
+        }
+
+        top = anchorRect.top + anchorRect.height / 2 - pickerHeight / 2;
+        if (top + pickerHeight > viewportBottom - margin) {
+            top = viewportBottom - pickerHeight - margin;
+        }
+        if (top < viewportTop + margin) {
+            top = viewportTop + margin;
+        }
+    }
+
+    floatingFlairPicker.style.left = `${left}px`;
+    floatingFlairPicker.style.top = `${top}px`;
+    floatingFlairPicker.classList.add('is-positioned');
+}
+
+async function submitFloatingFlair(emoji) {
+    const normalizedEmoji = normalizeFlairEmoji(emoji);
+    const videoId = activeFlairVideoId;
+    const songElement = activeFlairSongElement;
+    if (!videoId || !isValidFlairEmoji(normalizedEmoji)) return;
+    closeFloatingFlairPicker();
+    const success = await setQueueFlair(videoId, normalizedEmoji, songElement);
+    if (success) {
+        recordFlairUsage(normalizedEmoji);
+        refreshQuickReactionButtons();
+    }
+}
+
+function setFloatingFlairExpanded(expanded) {
+    floatingFlairExpanded = Boolean(expanded);
+    if (!floatingFlairPicker) return;
+    if (floatingFlairExpanded) {
+        activeFlairExpansionRect = activeFlairExpansionRect || floatingFlairPicker.getBoundingClientRect();
+        expandedHoverCloseAllowedAt = Date.now() + FLAIR_EXPANDED_HOVER_CLOSE_GRACE_MS;
+        ensureFloatingEmojiPicker();
+    } else {
+        activeFlairExpansionRect = null;
+        expandedHoverCloseAllowedAt = 0;
+    }
+    floatingFlairPicker.classList.remove('is-positioned');
+    floatingFlairPicker.classList.toggle('expanded', floatingFlairExpanded);
+    floatingFlairPicker.classList.toggle('reaction-mode', !floatingFlairExpanded);
+    positionFloatingFlairPicker();
+    if (floatingFlairExpanded) {
+        requestAnimationFrame(() => {
+            if (floatingFlairExpanded) {
+                floatingEmojiPicker?.focus();
+            }
+        });
+    }
+}
+
+function createQuickReactionButtonsHtml() {
+    return getQuickReactionFlairs().map(emoji => {
+        return `<button class="queue-reaction-option" type="button" data-flair="${escapeHtmlAttribute(emoji)}" aria-label="React with ${escapeHtmlAttribute(emoji)}">${escapeHtml(emoji)}</button>`;
+    }).join('');
+}
+
+function bindQuickReactionButtons() {
+    if (!floatingFlairPicker) return;
+    floatingFlairPicker.querySelectorAll('.queue-reaction-option').forEach(button => {
+        button.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            await submitFloatingFlair(button.dataset.flair);
+        });
+    });
+}
+
+function refreshQuickReactionButtons() {
+    if (!floatingFlairPicker) return;
+    const strip = floatingFlairPicker.querySelector('.queue-reaction-strip');
+    const expandButton = floatingFlairPicker.querySelector('.queue-reaction-expand');
+    if (!strip || !expandButton) return;
+
+    strip.querySelectorAll('.queue-reaction-option').forEach(button => button.remove());
+    expandButton.insertAdjacentHTML('beforebegin', createQuickReactionButtonsHtml());
+    bindQuickReactionButtons();
+}
+
+function ensureFloatingEmojiPicker() {
+    if (!floatingFlairPicker) return null;
+    if (floatingEmojiPicker) return floatingEmojiPicker;
+
+    floatingFlairPicker.insertAdjacentHTML(
+        'beforeend',
+        `<emoji-picker class="queue-emoji-picker" data-source="${FLAIR_EMOJI_DATA_SOURCE}"></emoji-picker>`
+    );
+    floatingEmojiPicker = floatingFlairPicker.querySelector('.queue-emoji-picker');
+    floatingEmojiPicker?.addEventListener('emoji-click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        await submitFloatingFlair(event.detail?.unicode || event.detail?.emoji?.unicode);
+    });
+
+    return floatingEmojiPicker;
+}
+
+function ensureFloatingFlairPicker() {
+    if (floatingFlairPicker) {
+        return floatingFlairPicker;
+    }
+
+    floatingFlairPicker = document.createElement('div');
+    floatingFlairPicker.className = 'queue-flair-picker queue-flair-picker-floating';
+    floatingFlairPicker.setAttribute('role', 'dialog');
+    floatingFlairPicker.setAttribute('aria-label', 'Choose flair');
+    floatingFlairPicker.innerHTML = `
+        <div class="queue-reaction-strip" role="menu" aria-label="Quick reactions">
+            ${createQuickReactionButtonsHtml()}
+            <button class="queue-reaction-expand" type="button" title="More emoji" aria-label="More emoji">
+                <span class="material-icons">add</span>
+            </button>
+        </div>
+    `;
+    document.body.appendChild(floatingFlairPicker);
+
+    bindQuickReactionButtons();
+    floatingFlairPicker.querySelector('.queue-reaction-expand')?.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        rememberFlairPointerPosition(event);
+        cancelFlairHoverClose();
+        activeFlairExpansionRect = floatingFlairPicker.getBoundingClientRect();
+        setFloatingFlairExpanded(true);
+    });
+
+    floatingFlairPicker.addEventListener('click', (event) => {
+        rememberFlairPointerPosition(event);
+        event.stopPropagation();
+    });
+    floatingFlairPicker.addEventListener('pointerenter', (event) => {
+        rememberFlairPointerPosition(event);
+        cancelFlairHoverClose();
+    });
+    floatingFlairPicker.addEventListener('pointermove', rememberFlairPointerPosition);
+    floatingFlairPicker.addEventListener('pointerleave', (event) => {
+        rememberFlairPointerPosition(event);
+        scheduleFlairHoverClose();
+    });
+    document.addEventListener('pointerdown', (event) => {
+        if (!floatingFlairPicker?.classList.contains('picker-open')) return;
+        if (floatingFlairPicker.contains(event.target)) return;
+        if (activeFlairAnchor?.contains(event.target)) return;
+        closeFloatingFlairPicker();
+    }, true);
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            closeFloatingFlairPicker();
+        }
+    });
+    window.addEventListener('resize', positionFloatingFlairPicker, { passive: true });
+    window.addEventListener('scroll', positionFloatingFlairPicker, { passive: true, capture: true });
+
+    return floatingFlairPicker;
+}
+
+function openFloatingFlairPicker(anchorElement, songElement, videoId, { toggle = false } = {}) {
+    if (!anchorElement || !songElement || !videoId) return;
+
+    const picker = ensureFloatingFlairPicker();
+    const panel = songElement.querySelector('.queue-flair-panel');
+    const isSameAnchorOpen = picker.classList.contains('picker-open') && activeFlairAnchor === anchorElement;
+
+    if (isSameAnchorOpen && toggle) {
+        closeFloatingFlairPicker();
+        return;
+    }
+    if (isSameAnchorOpen) {
+        cancelFlairHoverClose();
+        return;
+    }
+
+    closeFloatingFlairPicker();
+    cancelFlairHoverClose();
+    activeFlairAnchor = anchorElement;
+    activeFlairAnchorRect = anchorElement.getBoundingClientRect();
+    activeFlairExpansionRect = null;
+    activeFlairSongElement = songElement;
+    activeFlairVideoId = videoId;
+    panel?.classList.add('picker-open');
+    picker.classList.remove('picker-open', 'is-positioned');
+    setFloatingFlairExpanded(false);
+    positionFloatingFlairPicker();
+    picker.classList.add('picker-open');
+}
 
 function getEffectiveCurrentPlayingIndex(processedQueue = state.processedQueueData) {
     // Prefer server-provided/currently tracked index to avoid ambiguity with duplicate videoIds.
@@ -306,22 +686,14 @@ function createFlairPanelHtml(song) {
     if (recentFlairMatched) {
         recentlyAddedFlairs.delete(song.videoId);
     }
-    const flairButtons = QUEUE_FLAIRS.map(emoji => {
-        return `<button class="queue-flair-option" type="button" data-flair="${escapeHtmlAttribute(emoji)}" aria-label="Add ${escapeHtmlAttribute(emoji)} flair">${escapeHtml(emoji)}</button>`;
-    }).join('');
-    const addButton = hasFlairs
-        ? ''
-        : `<button class="queue-flair-add" type="button" title="Add flair" aria-label="Add flair">
-                <span class="material-icons">add_reaction</span>
-            </button>`;
+    const addButton = `<button class="queue-flair-add" type="button" title="Add flair" aria-label="Add flair">
+            <span class="material-icons">add</span>
+        </button>`;
 
     return `
         <div class="queue-flair-panel ${hasFlairs ? 'has-flairs' : ''}">
             ${addButton}
             <div class="queue-flair-list">${flairChips}</div>
-            <div class="queue-flair-picker" role="menu" aria-label="Choose flair">
-                ${flairButtons}
-            </div>
         </div>
     `;
 }
@@ -408,25 +780,34 @@ export function createSongElement(song, index, handlers = {}) {
         ${isCurrent ? '<span class="loader"></span>' : ''}
     `;
 
-    div.querySelector('.queue-flair-add')?.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        div.querySelector('.queue-flair-panel')?.classList.toggle('picker-open');
-    });
-
-    div.querySelectorAll('.queue-flair-option').forEach(button => {
-        button.addEventListener('click', async (event) => {
-            event.preventDefault();
+    const attachFlairTriggerListeners = (button) => {
+        button.addEventListener('pointerdown', (event) => {
             event.stopPropagation();
-            await setQueueFlair(song.videoId, button.dataset.flair, div);
         });
-    });
-
-    div.querySelectorAll('.queue-flair-chip').forEach(button => {
+        button.addEventListener('pointerenter', (event) => {
+            openFloatingFlairPicker(event.currentTarget, div, song.videoId);
+        });
+        button.addEventListener('pointerleave', () => {
+            scheduleFlairHoverClose();
+        });
         button.addEventListener('click', (event) => {
             event.preventDefault();
             event.stopPropagation();
-            div.querySelector('.queue-flair-panel')?.classList.toggle('picker-open');
+        });
+    };
+
+    const addFlairButton = div.querySelector('.queue-flair-add');
+    if (addFlairButton) {
+        attachFlairTriggerListeners(addFlairButton);
+    }
+
+    div.querySelectorAll('.queue-flair-chip').forEach(button => {
+        button.addEventListener('pointerdown', (event) => {
+            event.stopPropagation();
+        });
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
         });
     });
 

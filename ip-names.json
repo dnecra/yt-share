@@ -35,6 +35,7 @@
   "::ffff:192.168.99.20": ["danny","mamang","admin pemakan handal"],
   "::ffff:192.168.99.26": ["thalia"],
   "::ffff:192.168.99.23": ["vicky"],
+  "::ffff:192.168.99.12": ["mas je", "jay", "giant"],
   "::1": ["necra","roommaster","host","server","atmin","admin","df-arif","GM","arif"],
   "127.0.0.1": ["necra","roommaster","host","server","atmin","admin","df-arif","GM","arif"],
   "localhost": ["necra","roommaster","host","server","atmin","admin","df-arif","GM","arif"]

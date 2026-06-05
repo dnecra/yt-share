@@ -310,6 +310,7 @@
         .queue-flair-add {
             width: 30px;
             height: 30px;
+            flex: 0 0 30px;
             border: 0;
             border-radius: 50%;
             display: flex;
@@ -318,7 +319,7 @@
             color: var(--text-secondary);
             background: rgba(255, 255, 255, 0.04);
             opacity: 0.34;
-            cursor: pointer;
+            cursor: default;
             transition: opacity 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
         }
 
@@ -370,46 +371,140 @@
         }
 
         .queue-flair-picker {
-            position: absolute;
-            top: 50%;
-            right: calc(100% + 6px);
-            display: grid;
-            grid-template-columns: repeat(10, 30px);
-            gap: 5px;
-            padding: 7px;
+            position: fixed;
+            left: 12px;
+            top: 12px;
+            width: min(496px, calc(100vw - 24px));
+            height: 56px;
+            box-sizing: border-box;
             border-radius: 999px;
             background: rgba(18, 18, 18, 0.96);
             border: 1px solid rgba(255, 255, 255, 0.12);
             box-shadow: 0 16px 32px rgba(0, 0, 0, 0.45);
             opacity: 0;
+            visibility: hidden;
             pointer-events: none;
-            transform: translateY(-50%) translateX(8px) scale(0.92);
-            transform-origin: center right;
-            transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.2, 1.4, 0.3, 1);
-            z-index: 20;
+            overflow: hidden;
+            transform: translateY(4px) scale(0.98);
+            transform-origin: top right;
+            transition: opacity 0.16s ease, transform 0.16s ease;
+            z-index: 5000;
         }
 
-        .queue-flair-panel.picker-open .queue-flair-picker {
+        .queue-flair-picker.picker-open.is-positioned {
             opacity: 1;
+            visibility: visible;
             pointer-events: auto;
-            transform: translateY(-50%) translateX(0) scale(1);
+            transform: translateY(0) scale(1);
         }
 
-        .queue-flair-option {
-            width: 30px;
-            height: 30px;
+        .queue-flair-picker.expanded {
+            width: min(330px, calc(100vw - 24px));
+            height: min(390px, calc(100vh - 24px));
+            border-radius: 18px;
+            background:
+                linear-gradient(180deg, rgba(253, 2, 52, 0.10), rgba(18, 18, 18, 0) 34%),
+                rgba(18, 18, 18, 0.98);
+            border-color: rgba(253, 2, 52, 0.30);
+            box-shadow: 0 18px 42px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(255, 255, 255, 0.05);
+        }
+
+        .queue-reaction-strip {
+            display: grid;
+            grid-auto-flow: column;
+            grid-auto-columns: minmax(32px, 40px);
+            grid-template-columns: repeat(11, minmax(32px, 40px));
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            height: 100%;
+            padding: 7px 8px;
+            box-sizing: border-box;
+            overflow-x: hidden;
+            overflow-y: hidden;
+        }
+
+        .queue-reaction-strip::-webkit-scrollbar {
+            display: none;
+        }
+
+        .queue-flair-picker.expanded .queue-reaction-strip {
+            display: none;
+        }
+
+        .queue-reaction-option,
+        .queue-reaction-expand {
+            width: 100%;
+            min-width: 0;
+            height: 40px;
             border: 0;
             border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-primary);
             background: rgba(255, 255, 255, 0.07);
             cursor: pointer;
-            font-size: 17px;
+            font-size: 22px;
             line-height: 1;
-            transition: transform 0.16s ease, background-color 0.16s ease;
+            transition: background-color 0.14s ease, transform 0.14s ease;
         }
 
-        .queue-flair-option:hover {
-            background: rgba(255, 255, 255, 0.18);
-            transform: translateY(-3px) rotate(-8deg) scale(1.22);
+        .queue-reaction-option:hover,
+        .queue-reaction-expand:hover {
+            background: rgba(255, 255, 255, 0.16);
+            transform: translateY(-2px) scale(1.08);
+        }
+
+        .queue-reaction-expand .material-icons {
+            font-size: 20px;
+        }
+
+        .queue-emoji-picker {
+            width: 100%;
+            height: 100%;
+            display: none;
+            border-radius: 18px;
+            overflow: hidden;
+            --background: transparent;
+            --border-color: rgba(253, 2, 52, 0.18);
+            --button-hover-background: rgba(253, 2, 52, 0.16);
+            --button-active-background: rgba(253, 2, 52, 0.24);
+            --category-emoji-padding: 6px;
+            --emoji-size: 1.35rem;
+            --indicator-color: #fd0234;
+            --input-border-color: rgba(253, 2, 52, 0.28);
+            --input-font-color: var(--text-primary);
+            --input-placeholder-color: var(--text-secondary);
+            --outline-color: rgba(253, 2, 52, 0.75);
+            --text-color: var(--text-primary);
+        }
+
+        .queue-flair-picker.expanded .queue-emoji-picker {
+            display: block;
+        }
+
+        @media (max-width: 720px) {
+            .queue-flair-picker {
+                width: min(496px, calc(100vw - 24px));
+            }
+
+            .queue-flair-picker.expanded {
+                height: min(420px, calc(100vh - 24px));
+            }
+
+            .queue-reaction-strip {
+                grid-auto-columns: minmax(26px, 36px);
+                grid-template-columns: repeat(11, minmax(26px, 36px));
+                gap: 3px;
+                padding-inline: 7px;
+            }
+
+            .queue-reaction-option,
+            .queue-reaction-expand {
+                height: 36px;
+                font-size: 19px;
+            }
         }
 
         .song.flair-sending .queue-flair-add {
