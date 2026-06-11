@@ -1,5 +1,5 @@
 import { state } from './config.js';
-import { previousTrack, nextTrack, togglePlay, updateVolume, updateVolumeUI } from './navigation.js';
+import { updateVolumeUI } from './navigation.js';
 import { logMessage, formatTime } from './utils.js';
 
 // WebSocket message handler moved from main.js
@@ -255,53 +255,6 @@ export function switchTab(tabName) {
     if (typeof window.loadSearchTab === 'function') {
         window.loadSearchTab(tabName);
     }
-}
-
-// Keyboard shortcuts
-export function initKeyboardShortcuts() {
-    document.addEventListener('keydown', function(e) {
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
-        switch(e.key) {
-            case ' ':
-                e.preventDefault();
-                togglePlay();
-                break;
-            case 'ArrowRight':
-            case 'n':
-                e.preventDefault();
-                nextTrack();
-                break;
-            case 'ArrowLeft':
-            case 'p':
-                e.preventDefault();
-                previousTrack();
-                break;
-            case 'ArrowUp':
-                e.preventDefault();
-                const volSlider = document.querySelector('.volume-slider');
-                if (volSlider) {
-                    volSlider.value = Math.min(100, parseInt(volSlider.value) + 5);
-                    updateVolume(volSlider.value);
-                }
-                break;
-            case 'ArrowDown':
-                e.preventDefault();
-                const volSliderDown = document.querySelector('.volume-slider');
-                if (volSliderDown) {
-                    volSliderDown.value = Math.max(1, parseInt(volSliderDown.value) - 5);
-                    updateVolume(volSliderDown.value);
-                }
-                break;
-            case 'j':
-                e.preventDefault();
-                // Scroll to current song - requires queue module
-                if (window.scrollToCurrentSong) {
-                    window.scrollToCurrentSong(true);
-                }
-                break;
-        }
-    });
 }
 
 // Mobile swipe detection

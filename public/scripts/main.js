@@ -7,7 +7,7 @@ import { displayLyricsUI, hideLyricsUI, toggleLyricsCollapse, updateLyricsDispla
 import { refreshLyricDynamicTheme, setLyricDynamicThemeEnabled, getLyricDynamicThemeEnabled } from './modules/lyric-dynamic-theme.js';
 import { deleteSongFromQueue, moveSongInQueue, moveSongNext, clearQueue, shuffleQueue, addToQueue, updateQueueFromData, updateQueue, scrollToCurrentSong } from './modules/queue.js';
 import { 
-    showToast, toggleSearchResults, switchTab, initKeyboardShortcuts, 
+    showToast, toggleSearchResults, switchTab,
     initMobileSwipe, initCursorTracking, initResizeHandler, 
     handlePopoutMode, updatePopoutToggleBtn, initMobileHint, toggleMobileSection,
     updateNowPlayingHighlight, handleWebSocketMessage, openPopoutWindow
@@ -943,7 +943,6 @@ async function init() {
     // Initialize UI handlers
     handlePopoutMode();
     initCursorTracking();
-    initKeyboardShortcuts();
     initMobileSwipe();
     initResizeHandler();
     updatePopoutToggleBtn();

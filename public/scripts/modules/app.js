@@ -822,12 +822,22 @@ function stopVisualizer() {
 // ============================================================================
 
 let isStreamPlaying = false;
-let reconnectTimer = null;
-let reconnectAttempts = 0;
-let isReconnecting = false;
+let isStreamStarting = false;
+const STREAM_VOLUME_LOCK_MESSAGE = 'Atur volume di speaker masing2 gan';
+const SWYH_STREAM_URL = 'http://192.168.99.47:5901/stream/swyh.wav';
+
+function setStreamAudioActive(active) {
+    document.body.classList.toggle('stream-audio-active', active);
+    document.body.dispatchEvent(new CustomEvent('stream-audio-state-change', {
+        detail: {
+            active,
+            message: active ? STREAM_VOLUME_LOCK_MESSAGE : ''
+        }
+    }));
+}
 
 export function toggleStream() {
-    if (isStreamPlaying) {
+    if (isStreamPlaying || isStreamStarting) {
         stopStream();
     } else {
         startStream();
@@ -850,16 +860,9 @@ export function startStream() {
 
     showVisualizer();
     updateStatus('Connecting to stream...');
+    isStreamStarting = true;
     
-    // Reset reconnect state
-    reconnectAttempts = 0;
-    isReconnecting = false;
-    if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-    }
-
-    const streamUrl = `/audio-proxy?url=${encodeURIComponent('http://192.168.99.47:5901/stream/swyh.wav')}`;
+    const streamUrl = `/audio-proxy?url=${encodeURIComponent(SWYH_STREAM_URL)}`;
     
     // Complete reset
     audioPlayer.pause();
@@ -870,8 +873,7 @@ export function startStream() {
     audioPlayer.preload = 'none';
     audioPlayer.autoplay = false;
     
-    // Set source with cache-busting
-    audioPlayer.src = streamUrl + '&t=' + Date.now();
+    audioPlayer.src = streamUrl;
     audioPlayer.load();
     
     // Apply saved volume immediately
@@ -884,115 +886,27 @@ export function startStream() {
     const onPlaying = () => {
         updateStatus('Streaming (Live)');
         isStreamPlaying = true;
-        isReconnecting = false;
-        reconnectAttempts = 0;
+        isStreamStarting = false;
+        setStreamAudioActive(true);
         
         const label = toggleBtn.querySelector('.stream-label');
         if (label) label.textContent = 'STOP STREAM';
         toggleBtn.classList.add('streaming');
         
         initVisualizer();
-        maintainLiveSync(audioPlayer);
         
         audioPlayer.removeEventListener('playing', onPlaying);
     };
     
     audioPlayer.addEventListener('playing', onPlaying, { once: true });
     
-    // Start playback - straight stream, no exe detection
+    // Start playback - straight SWYH stream, no reconnect/launcher logic.
     audioPlayer.play().catch(err => {
         updateStatus('Failed to start: ' + err.message, true);
-        startAutoReconnect(audioPlayer, toggleBtn);
+        cleanup(audioPlayer, toggleBtn);
     });
     
     console.log('[STREAM] Stream started');
-}
-
-function maintainLiveSync(audioPlayer) {
-    const syncInterval = setInterval(() => {
-        if (!isStreamPlaying) {
-            clearInterval(syncInterval);
-            return;
-        }
-        
-        // Check if we have buffered data
-        if (audioPlayer.buffered.length > 0) {
-            const bufferEnd = audioPlayer.buffered.end(audioPlayer.buffered.length - 1);
-            const currentTime = audioPlayer.currentTime;
-            const lag = bufferEnd - currentTime;
-            
-            // If lagging more than 0.5 seconds, jump to live edge
-            if (lag > 0.5) {
-                audioPlayer.currentTime = bufferEnd - 0.1;
-            }
-        }
-        
-        // If playback stalls, start reconnect
-        if (audioPlayer.paused && isStreamPlaying && !isReconnecting) {
-            const toggleBtn = document.getElementById('stream-btn');
-            startAutoReconnect(audioPlayer, toggleBtn);
-        }
-    }, 500);
-    
-    audioPlayer._syncInterval = syncInterval;
-}
-
-function startAutoReconnect(audioPlayer, toggleBtn) {
-    if (isReconnecting) return;
-    
-    isReconnecting = true;
-    
-    // Clear existing intervals
-    if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-    }
-    
-    if (audioPlayer._syncInterval) {
-        clearInterval(audioPlayer._syncInterval);
-        audioPlayer._syncInterval = null;
-    }
-    
-    const streamUrl = `/audio-proxy?url=${encodeURIComponent('http://192.168.99.47:5901/stream/swyh.wav')}`;
-    
-    function attemptReconnect() {
-        if (!isStreamPlaying) {
-            if (reconnectTimer) {
-                clearTimeout(reconnectTimer);
-                reconnectTimer = null;
-            }
-            isReconnecting = false;
-            return;
-        }
-        
-        reconnectAttempts++;
-        const backoffTime = Math.min(reconnectAttempts * 1000, 5000);
-        
-        updateStatus(`Server unreachable - Reconnecting (attempt ${reconnectAttempts})`, true);
-        
-        audioPlayer.src = streamUrl + '&t=' + Date.now();
-        audioPlayer.load();
-        
-        audioPlayer.play()
-            .then(() => {
-                if (reconnectTimer) {
-                    clearTimeout(reconnectTimer);
-                    reconnectTimer = null;
-                }
-                isReconnecting = false;
-                reconnectAttempts = 0;
-                updateStatus('Reconnected - Streaming (Live)');
-                maintainLiveSync(audioPlayer);
-            })
-            .catch(err => {
-                if (reconnectTimer) {
-                    clearTimeout(reconnectTimer);
-                }
-                reconnectTimer = setTimeout(attemptReconnect, backoffTime);
-            });
-    }
-    
-    attemptReconnect();
 }
 
 export function stopStream() {
@@ -1001,13 +915,7 @@ export function stopStream() {
     
     if (!audioPlayer || !toggleBtn) return;
 
-    // Clear reconnect interval
-    if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-    }
-    
-    isReconnecting = false;
+    isStreamStarting = false;
     
     cleanup(audioPlayer, toggleBtn);
     
@@ -1022,18 +930,14 @@ export function stopStream() {
 }
 
 function cleanup(audioPlayer, toggleBtn) {
-    // Clear sync interval
-    if (audioPlayer._syncInterval) {
-        clearInterval(audioPlayer._syncInterval);
-        audioPlayer._syncInterval = null;
-    }
-    
     // Stop playback
     audioPlayer.pause();
     audioPlayer.src = '';
     audioPlayer.load();
     
     isStreamPlaying = false;
+    isStreamStarting = false;
+    setStreamAudioActive(false);
     
     if (toggleBtn) {
         const label = toggleBtn.querySelector('.stream-label');
@@ -1072,13 +976,7 @@ export function initAudioStreamErrorHandler() {
             switch(error.code) {
                 case 2: 
                     errorMsg = 'Server unreachable'; 
-                    if (isStreamPlaying && !isReconnecting) {
-                        updateStatus(errorMsg, true);
-                        const toggleBtn = document.getElementById('stream-btn');
-                        startAutoReconnect(audioPlayer, toggleBtn);
-                        return;
-                    }
-                    return;
+                    break;
                 case 3: 
                 case 4: 
                     if (!isStreamPlaying) return;
@@ -1086,11 +984,9 @@ export function initAudioStreamErrorHandler() {
             }
         }
         
-        if (!isReconnecting) {
-            updateStatus('Error: ' + errorMsg, true);
-            const toggleBtn = document.getElementById('stream-btn');
-            cleanup(audioPlayer, toggleBtn);
-        }
+        updateStatus('Error: ' + errorMsg, true);
+        const toggleBtn = document.getElementById('stream-btn');
+        cleanup(audioPlayer, toggleBtn);
     });
 
     isAudioErrorHandlerInitialized = true;

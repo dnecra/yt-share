@@ -944,6 +944,63 @@
             background-color: transparent;
         }
 
+        .volume-control.volume-slider-locked {
+            position: relative;
+        }
+
+        .volume-control.volume-slider-locked::after {
+            content: attr(data-volume-lock-message);
+            position: absolute;
+            left: 50%;
+            bottom: calc(100% + 10px);
+            transform: translateX(-50%) translateY(4px);
+            width: max-content;
+            max-width: min(320px, calc(100vw - 32px));
+            padding: 8px 10px;
+            border-radius: 6px;
+            background: rgba(18, 18, 18, 0.94);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            color: #fff;
+            font-size: 12px;
+            font-weight: 600;
+            line-height: 1.25;
+            text-align: center;
+            white-space: normal;
+            pointer-events: none;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 80ms ease, transform 80ms ease, visibility 80ms ease;
+            z-index: 1205;
+        }
+
+        .volume-control.volume-slider-locked::before {
+            content: '';
+            position: absolute;
+            left: 50%;
+            bottom: calc(100% + 4px);
+            transform: translateX(-50%);
+            border: 6px solid transparent;
+            border-top-color: rgba(18, 18, 18, 0.94);
+            pointer-events: none;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 80ms ease, visibility 80ms ease;
+            z-index: 1206;
+        }
+
+        body.stream-audio-active .volume-control.volume-slider-locked:hover::after,
+        body.stream-audio-active .volume-control.volume-slider-locked:focus-within::after,
+        body.stream-audio-active .volume-control.volume-slider-locked:hover::before,
+        body.stream-audio-active .volume-control.volume-slider-locked:focus-within::before {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        body.stream-audio-active .volume-control.volume-slider-locked:hover::after,
+        body.stream-audio-active .volume-control.volume-slider-locked:focus-within::after {
+            transform: translateX(-50%) translateY(0);
+        }
+
         .volume-slider {
             -webkit-appearance: none;
             appearance: none;
@@ -971,6 +1028,26 @@
 
         .volume-slider::-webkit-slider-thumb:hover {
             transform: scale(1.2);
+        }
+
+        body.stream-audio-active .volume-control.volume-slider-locked .volume-slider {
+            cursor: not-allowed;
+            opacity: 0.55;
+            background: rgba(255, 255, 255, 0.16);
+        }
+
+        body.stream-audio-active .volume-control.volume-slider-locked .volume-slider::-webkit-slider-thumb {
+            cursor: not-allowed;
+            background: rgba(255, 255, 255, 0.55);
+        }
+
+        body.stream-audio-active .volume-control.volume-slider-locked .volume-slider::-webkit-slider-thumb:hover {
+            transform: none;
+        }
+
+        body.stream-audio-active .volume-control.volume-slider-locked .volume-slider::-moz-range-thumb {
+            cursor: not-allowed;
+            background: rgba(255, 255, 255, 0.55);
         }
 
         .volume-control .material-icons {

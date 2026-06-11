@@ -374,7 +374,9 @@ function sanitizeLyricsTranslationPayload(data) {
 
     const sanitized = { ...data };
     delete sanitized.translatedSyncedLyrics;
+    delete sanitized.translatedPlainLyrics;
     delete sanitized.englishSyncedLyrics;
+    delete sanitized.englishPlainLyrics;
     sanitized.translationState = 'excluded';
     sanitized.translationLanguage = {
         ...translationLanguage,

@@ -1427,6 +1427,9 @@ animateOutLyrics().then(() => {
         const translatedSyncedSource = data?.translatedSyncedLyrics || data?.englishSyncedLyrics || null;
         const plainText = getPlainTextFromLyricsPayload(data);
         const romanizedPlainText = (typeof data?.romanizedPlainLyrics === 'string') ? data.romanizedPlainLyrics : '';
+        const translatedPlainText = (typeof data?.translatedPlainLyrics === 'string')
+            ? data.translatedPlainLyrics
+            : ((typeof data?.englishPlainLyrics === 'string') ? data.englishPlainLyrics : '');
 
         if (syncedSource) {
             state.isSyncedLyrics = true;
@@ -1571,28 +1574,48 @@ animateOutLyrics().then(() => {
         if (!isFetchStillValid() || !isRenderStillCurrent()) return;
 
         if (plainText && plainText.trim().length > 0) {
+            const plainLines = plainText.split(/\r?\n/);
+            const romanizedPlainLines = romanizedPlainText ? romanizedPlainText.split(/\r?\n/) : [];
+            const translatedPlainLines = translatedPlainText ? translatedPlainText.split(/\r?\n/) : [];
+
             if (plainLyricsContainer) {
                 plainLyricsContainer.innerHTML = '';
                 plainLyricsContainer.style.display = 'none';
-                plainLyricsContainer.classList.remove('revealed', 'active', 'song-changing');
+                plainLyricsContainer.classList.remove('revealed', 'song-changing');
+                plainLyricsContainer.classList.add('active');
+
+                plainLines.forEach((lineText, index) => {
+                    const text = (lineText || '').toString();
+                    const div = buildWordAnimatedLine(text, {
+                        index,
+                        needsRomanization: isNonLatin(text),
+                        isMusicNote: false,
+                        prefetchedRomanized: romanizedPlainLines[index] || '',
+                        prefetchedTranslation: translatedPlainLines[index] || ''
+                    });
+                    plainLyricsContainer.appendChild(div);
+                });
             }
+            clearLyricLineElementsCache();
             if (lyricsContainer) {
-                lyricsContainer.classList.add('no-lyrics');
-                lyricsContainer.classList.remove('plain-mode');
-                lyricsContainer.classList.remove('has-lyrics');
+                lyricsContainer.classList.remove('no-lyrics');
+                lyricsContainer.classList.add('plain-mode');
+                lyricsContainer.classList.add('has-lyrics');
                 lyricsContainer.classList.remove('loading-lyrics');
-                lyricsContainer.classList.remove('visible');
+                lyricsContainer.classList.add('visible');
             }
-            if (rightNowPlaying) rightNowPlaying.classList.add('no-lyrics');
-            setCompactNoLyricsState(true);
+            if (rightNowPlaying) rightNowPlaying.classList.remove('no-lyrics');
+            setCompactNoLyricsState(false);
             if (lyricsLoadingEl) lyricsLoadingEl.classList.remove('active');
+
+            revealLyricsBlock(plainLyricsContainer, syncedLyricsContainer);
 
             if (setLastFetched) {
                 state.lastFetchedVideoId = state.currentVideoId;
                 state.currentFetchVideoId = null;
             }
 
-            console.log(`[${logTag}] Plain lyrics available but hidden by policy`);
+            console.log(`[${logTag}] Lyrics loaded and displayed (plain)`);
             return;
         }
 

@@ -6,12 +6,14 @@ const VOLUME_SEND_THROTTLE_MS = 120;
 const VOLUME_SEND_DEBOUNCE_MS = 180;
 const VOLUME_REMOTE_SYNC_GRACE_MS = 900;
 const VOLUME_REMOTE_EPSILON = 1;
+const STREAM_VOLUME_LOCK_MESSAGE = 'Atur volume di speaker masing2 gan';
 let volumeControlsInitialized = false;
 let volumeSliderElement = null;
 let volumeSendTimer = null;
 let pendingVolumePercent = null;
 let lastVolumeSendStartedAt = 0;
 let volumePointerReleaseTimer = null;
+let lockedVolumeSliderValue = null;
 
 // Progress tracking
 export function startProgressTracking(songData) {
@@ -202,6 +204,38 @@ function getVolumeSlider() {
     return volumeSliderElement;
 }
 
+function isStreamAudioActive() {
+    return document.body.classList.contains('stream-audio-active');
+}
+
+function setVolumeSliderLockState(locked) {
+    const volumeControl = document.querySelector('.volume-control');
+    const slider = getVolumeSlider();
+
+    if (volumeControl) {
+        volumeControl.classList.toggle('volume-slider-locked', locked);
+        if (locked) {
+            volumeControl.dataset.volumeLockMessage = STREAM_VOLUME_LOCK_MESSAGE;
+        } else {
+            delete volumeControl.dataset.volumeLockMessage;
+        }
+    }
+
+    if (slider) {
+        slider.setAttribute('aria-disabled', locked ? 'true' : 'false');
+        if (locked) {
+            lockedVolumeSliderValue = normalizePercentValue(slider.value);
+        }
+    }
+}
+
+function restoreLockedVolumeSliderValue() {
+    const slider = getVolumeSlider();
+    if (!slider || lockedVolumeSliderValue === null) return;
+    slider.value = String(lockedVolumeSliderValue);
+    updateVolumeIcon(lockedVolumeSliderValue);
+}
+
 function normalizePercentValue(value) {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return 1;
@@ -218,26 +252,16 @@ function setVolumeSliderPercent(percent, { force = false } = {}) {
         if (force || currentValue !== normalized) {
             slider.value = String(normalized);
         }
+        if (isStreamAudioActive()) {
+            lockedVolumeSliderValue = normalized;
+        }
     }
 
     updateVolumeIcon(normalized);
 }
 
 function shouldIgnoreRemoteVolumePercent(percent, { optimistic = false } = {}) {
-    const now = Date.now();
-    const remotePercent = normalizePercentValue(percent);
-    const localPercent = normalizePercentValue(state.volumePercent);
-
-    if (!state.isUserAdjustingVolume && now >= (state.volumeRemoteSyncLockUntil || 0)) {
-        return false;
-    }
-
-    const delta = Math.abs(remotePercent - localPercent);
-    if (delta <= VOLUME_REMOTE_EPSILON) {
-        return true;
-    }
-
-    return optimistic;
+    return false;
 }
 
 function markLocalVolumeInteraction() {
@@ -354,6 +378,11 @@ export function updateVolumeUI(volume, options = {}) {
 }
 
 export async function updateVolume(value) {
+    if (isStreamAudioActive()) {
+        restoreLockedVolumeSliderValue();
+        return;
+    }
+
     const volumePercent = normalizePercentValue(value);
     markLocalVolumeInteraction();
     setVolumeSliderPercent(volumePercent, { force: true });
@@ -367,7 +396,16 @@ export function initVolumeControls() {
     const volumeSlider = getVolumeSlider();
     if (!volumeSlider) return;
 
-    const startAdjust = () => {
+    const blockIfStreamAudioActive = (event) => {
+        if (!isStreamAudioActive()) return false;
+        event.preventDefault();
+        event.stopPropagation();
+        restoreLockedVolumeSliderValue();
+        return true;
+    };
+
+    const startAdjust = (event) => {
+        if (blockIfStreamAudioActive(event)) return;
         markLocalVolumeInteraction();
     };
     const endAdjust = () => {
@@ -377,12 +415,17 @@ export function initVolumeControls() {
     volumeSlider.addEventListener('mousedown', startAdjust);
     volumeSlider.addEventListener('touchstart', startAdjust);
     volumeSlider.addEventListener('pointerdown', startAdjust);
+    volumeSlider.addEventListener('keydown', (event) => {
+        blockIfStreamAudioActive(event);
+    });
     document.addEventListener('mouseup', endAdjust);
     document.addEventListener('touchend', endAdjust);
     document.addEventListener('pointerup', endAdjust);
     document.addEventListener('pointercancel', endAdjust);
 
     volumeSlider.addEventListener('input', (e) => {
+        if (blockIfStreamAudioActive(e)) return;
+
         const newValue = normalizePercentValue(e.target.value);
         markLocalVolumeInteraction();
         setVolumeSliderPercent(newValue, { force: true });
@@ -396,6 +439,12 @@ export function initVolumeControls() {
         const DEBOUNCE_MS = 300;
 
         bottomControls.addEventListener('wheel', (e) => {
+            if (isStreamAudioActive()) {
+                e.preventDefault();
+                restoreLockedVolumeSliderValue();
+                return;
+            }
+
             e.preventDefault();
             if (!volumeSlider) return;
 
@@ -419,5 +468,9 @@ export function initVolumeControls() {
     }
 
     setVolumeSliderPercent(normalizePercentValue(volumeSlider.value), { force: true });
+    setVolumeSliderLockState(isStreamAudioActive());
+    document.body.addEventListener('stream-audio-state-change', (event) => {
+        setVolumeSliderLockState(!!event.detail?.active);
+    });
     volumeControlsInitialized = true;
 }
