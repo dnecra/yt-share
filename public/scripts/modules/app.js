@@ -1,4 +1,4 @@
-import { API_URL } from './config.js';
+import { API_URL, state } from './config.js';
 import { getThumbnailUrl } from './connection.js';
 import { logMessage } from './utils.js';
 import { addToQueue } from './queue.js';
@@ -828,12 +828,38 @@ const SWYH_STREAM_URL = 'http://192.168.99.47:5901/stream/swyh.wav';
 
 function setStreamAudioActive(active) {
     document.body.classList.toggle('stream-audio-active', active);
+    updateClientStreamStatus(active);
     document.body.dispatchEvent(new CustomEvent('stream-audio-state-change', {
         detail: {
             active,
             message: active ? STREAM_VOLUME_LOCK_MESSAGE : ''
         }
     }));
+}
+
+function updateClientStreamStatus(active) {
+    const status = document.getElementById('client-stream-status');
+    const text = document.getElementById('client-stream-status-text');
+    if (!status) return;
+    status.hidden = !active;
+    status.title = active ? 'Streaming: You' : '';
+    if (text) {
+        text.innerHTML = active
+            ? '<span class="client-stream-status-name">You</span> <span class="client-stream-status-suffix">streaming</span>'
+            : '';
+    }
+}
+
+function sendClientStreamStatus(active) {
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+    try {
+        state.ws.send(JSON.stringify({
+            type: 'client_stream_status',
+            active: !!active
+        }));
+    } catch (_) {
+        // Best effort only.
+    }
 }
 
 export function toggleStream() {
@@ -888,6 +914,7 @@ export function startStream() {
         isStreamPlaying = true;
         isStreamStarting = false;
         setStreamAudioActive(true);
+        sendClientStreamStatus(true);
         
         const label = toggleBtn.querySelector('.stream-label');
         if (label) label.textContent = 'STOP STREAM';
@@ -938,6 +965,7 @@ function cleanup(audioPlayer, toggleBtn) {
     isStreamPlaying = false;
     isStreamStarting = false;
     setStreamAudioActive(false);
+    sendClientStreamStatus(false);
     
     if (toggleBtn) {
         const label = toggleBtn.querySelector('.stream-label');

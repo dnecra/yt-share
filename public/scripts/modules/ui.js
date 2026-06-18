@@ -428,8 +428,13 @@ export function updateNowPlayingHighlight() {
 // Popout mode handler
 export function handlePopoutMode() {
     if (isPopoutMode()) {
+        document.body.classList.remove('chat-open');
+
         const left = document.getElementById('left-section');
         if (left) left.style.display = 'none';
+
+        const chat = document.getElementById('chat-section');
+        if (chat) chat.style.display = 'none';
 
         const right = document.getElementById('right-section');
         if (right) {

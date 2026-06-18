@@ -27,6 +27,7 @@
     <div id="layout-container">
         <!-- Left Section -->
         <div id="left-section">
+            <div class="section-resize-handle section-resize-handle-right" data-resize-section="left" title="Resize queue"></div>
             <!-- Now Playing Section -->
             <div id="nowplaying">
                 <!-- Left Section: Now Playing -->
@@ -43,6 +44,9 @@
                 <!-- Right Section: Playback Controls -->
                 <div class="playback-controls" style="display: flex; align-items: center;">
                     
+                    <button class="control-button" onclick="toggleChatPanel()" title="Toggle chat">
+                        <span class="material-icons">chat</span>
+                    </button>
                     <button class="control-button" onclick="clearQueue()">
                         <span class="material-icons">delete_forever</span>
                     </button>
@@ -52,7 +56,7 @@
                     <button class="control-button" onclick="previousTrack()">
                         <span class="material-icons">skip_previous</span>
                     </button>
-                    <button class="control-button" onclick="togglePlay()">
+                    <button class="control-button play-pause" onclick="togglePlay()">
                         <span class="material-icons" id="play-pause-icon">play_arrow</span>
                     </button>
                     <button class="control-button" onclick="nextTrack()">
@@ -76,6 +80,7 @@
 
         <!-- Right Section -->
         <div id="right-section" class="lyrics-expanded">
+            <div class="section-resize-handle section-resize-handle-left" data-resize-section="right" title="Resize lyrics"></div>
             <div id="toast"></div>
             <div id="right-section-overlay"></div>
 
@@ -127,7 +132,14 @@
 
             <!-- Lyrics stay expanded by default -->
             <div id="top-buttons" style="display: flex; gap: 10px; justify-content: flex-end; align-items: center;">
+                <div id="client-stream-status" hidden>
+                    <span id="client-stream-status-dot" aria-hidden="true"></span>
+                    <span id="client-stream-status-text">Streaming active</span>
+                </div>
                   <div style="display:flex;align-items:center;gap:8px;">
+                <button id="chat-top-btn" class="top-action-btn icon-only" title="Open chat" onclick="toggleChatPanel(true)">
+                    <span class="material-icons stream-icon">chat</span>
+                </button>
                 <button id="floating-lyrics-download-btn" class="top-action-btn icon-only desktop-only left" title="Download Floating Lyrics">
                     <span class="material-icons stream-icon">download</span>
                 </button>
@@ -217,6 +229,56 @@
                     </button>
                 </div>
             </div>
+        </div>
+
+        <button id="chat-edge-tab" type="button" onclick="toggleChatPanel()" title="Open chat" aria-controls="chat-section" aria-expanded="false">
+            <span id="chat-edge-label">CHAT</span>
+        </button>
+        <div id="chat-edge-bubble" hidden>
+            <span id="chat-edge-bubble-sender"></span>
+            <span id="chat-edge-bubble-text"></span>
+        </div>
+
+        <!-- Chat Section -->
+        <aside id="chat-section" aria-label="Live chat">
+            <div class="section-resize-handle section-resize-handle-left" data-resize-section="chat" title="Resize chat"></div>
+            <div id="chat-header">
+                <div>
+                    <div id="chat-title">Layanan DF Chat</div>
+                    <div id="chat-subtitle">192.168.99.47</div>
+                </div>
+                <span id="chat-header-pulse-dot" aria-hidden="true"></span>
+            </div>
+            <div id="chat-notice-ticker" hidden>
+                <div id="chat-notice-marquee"></div>
+                <button id="chat-notice-ticker-close" type="button" title="Close notice">
+                    <span class="material-icons">close</span>
+                </button>
+            </div>
+            <div id="chat-online-section">
+                <div id="chat-online-title">Online</div>
+                <div id="chat-online-list"></div>
+            </div>
+            <div id="chat-messages">
+                <div id="chat-empty">No messages yet.</div>
+            </div>
+            <form id="chat-form" autocomplete="off">
+                <input id="chat-input" type="text" maxlength="500" placeholder="Message..." />
+                <button id="chat-send-btn" type="submit" title="Send message">
+                    <span class="material-icons">send</span>
+                </button>
+            </form>
+        </aside>
+    </div>
+
+    <div id="chat-notice-modal" hidden>
+        <div id="chat-notice-backdrop"></div>
+        <div id="chat-notice-dialog" role="dialog" aria-modal="true" aria-labelledby="chat-notice-title">
+            <button id="chat-notice-close" type="button" title="Close notice" aria-label="Close notice">
+                <span class="material-icons">close</span>
+            </button>
+            <div id="chat-notice-title">Notice</div>
+            <div id="chat-notice-message"></div>
         </div>
     </div>
     

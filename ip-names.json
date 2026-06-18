@@ -19,7 +19,7 @@
   "::ffff:192.168.99.17": ["indra"],
   "::ffff:192.168.99.5": ["jeremy"],
   "::ffff:192.168.99.46": ["max"],
-  "::ffff:192.168.99.48": ["mamat1"],
+  "::ffff:192.168.99.48": ["mamat","mamat animasi", "rahmat"],
   "::ffff:192.168.99.15": ["ilyasa"],
   "::ffff:192.168.99.50": ["erik"],
   "::ffff:192.168.99.41": ["Fadhlndko"],
@@ -36,6 +36,7 @@
   "::ffff:192.168.99.26": ["thalia"],
   "::ffff:192.168.99.23": ["vicky"],
   "::ffff:192.168.99.12": ["mas je", "jay", "giant"],
+  "::ffff:192.168.99.65": ["ervin", "erp", "psycho"],
   "::1": ["necra","roommaster","host","server","atmin","admin","df-arif","GM","arif"],
   "127.0.0.1": ["necra","roommaster","host","server","atmin","admin","df-arif","GM","arif"],
   "localhost": ["necra","roommaster","host","server","atmin","admin","df-arif","GM","arif"]

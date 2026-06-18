@@ -17,6 +17,8 @@ import {
     initAudioStreamErrorHandler, initVolumeControl, addCollectionToQueue, loadSearchTab
 } from './modules/app.js';
 import { initFloatingLyricsToggleButton, initFloatingLyricsDownloadButton } from './modules/floating-lyrics.js';
+import { initChat, toggleChatPanel, handleChatWebSocketMessage } from './modules/chat.js';
+import { initSectionResize } from './modules/section-resize.js';
 
 // Keep "hide lines after active blank-note" disabled on main index page.
 window.__lyricsBlankCutoffEnabled = false;
@@ -665,6 +667,7 @@ window.handleUnifiedInput = handleUnifiedInput;
 window.toggleStream = toggleStream;
 window.toggleLyricsCollapse = toggleLyricsCollapse;
 window.toggleMobileSection = toggleMobileSection;
+window.toggleChatPanel = toggleChatPanel;
 window.openPopoutWindow = openPopoutWindow;
 window.scrollToCurrentSong = scrollToCurrentSong;
 window.updateQueue = updateQueue;
@@ -942,6 +945,7 @@ async function init() {
     
     // Initialize UI handlers
     handlePopoutMode();
+    initSectionResize();
     initCursorTracking();
     initMobileSwipe();
     initResizeHandler();
@@ -950,6 +954,7 @@ async function init() {
     
     // Initialize app features
     initUnifiedInputListener();
+    initChat();
     initVolumeControl();
     initAudioStreamErrorHandler();
     console.log('[INIT] Audio system initialized');
@@ -966,7 +971,10 @@ async function init() {
     
     // Initialize WebSocket
     if (typeof WebSocket !== 'undefined' && !state.ws) {
-        initWebSocket(handleWebSocketMessage);
+        initWebSocket((message) => {
+            handleChatWebSocketMessage(message);
+            handleWebSocketMessage(message);
+        });
     }
     
     // Fetch initial state
