@@ -14,6 +14,7 @@ const senderColorCache = new Map();
 const usedSenderHues = [];
 
 let initialized = false;
+let notificationPermissionRequested = false;
 let messageList = null;
 let messageForm = null;
 let messageInput = null;
@@ -32,6 +33,45 @@ const activeStreamClients = new Map();
 
 function isChatOpen() {
     return document.body.classList.contains('chat-open');
+}
+
+function canUseNotifications() {
+    return typeof window !== 'undefined'
+        && 'Notification' in window
+        && window.isSecureContext;
+}
+
+function isPageActive() {
+    return document.visibilityState === 'visible' && document.hasFocus();
+}
+
+function requestChatNotificationPermission() {
+    if (!canUseNotifications() || notificationPermissionRequested || Notification.permission !== 'default') return;
+    notificationPermissionRequested = true;
+    Promise.resolve(Notification.requestPermission()).catch(() => {
+        // Ignore denied or blocked notification prompts.
+    });
+}
+
+function showChatNotification(message) {
+    if (!message || isPageActive() || !canUseNotifications() || Notification.permission !== 'granted') return;
+
+    const sender = getDisplayActor(message) || 'Guest';
+    const text = String(message.text || '').trim();
+    if (!text) return;
+
+    const notification = new Notification(`Chat from ${sender}`, {
+        body: text.length > 180 ? `${text.slice(0, 177)}...` : text,
+        tag: message.id ? `yt-share-chat-${message.id}` : 'yt-share-chat-message',
+        renotify: true,
+        silent: false
+    });
+
+    notification.onclick = () => {
+        window.focus();
+        toggleChatPanel(true);
+        notification.close();
+    };
 }
 
 function updateChatEdgeTab(open = isChatOpen()) {
@@ -355,6 +395,7 @@ export function handleChatWebSocketMessage(message) {
         case 'chat_message':
             renderChatMessage(message);
             showChatEdgeBubble(message);
+            showChatNotification(message);
             break;
         case 'chat_log':
             renderChatLog(message);
@@ -381,6 +422,7 @@ export function handleChatWebSocketMessage(message) {
 }
 
 export function toggleChatPanel(force) {
+    requestChatNotificationPermission();
     const nextOpen = typeof force === 'boolean' ? force : !isChatOpen();
     document.body.classList.toggle('chat-open', nextOpen);
     updateChatEdgeTab(nextOpen);
@@ -421,6 +463,7 @@ export function initChat() {
 
     messageForm.addEventListener('submit', (event) => {
         event.preventDefault();
+        requestChatNotificationPermission();
         const value = messageInput.value;
         sendChatMessage(value);
         messageInput.value = '';
@@ -436,8 +479,11 @@ export function initChat() {
     noticeClose?.addEventListener('click', closeNotice);
     noticeTickerClose?.addEventListener('click', closeNoticeTicker);
     edgeBubble?.addEventListener('click', () => {
+        requestChatNotificationPermission();
         toggleChatPanel(true);
     });
+    document.getElementById('chat-edge-tab')?.addEventListener('click', requestChatNotificationPermission);
+    document.getElementById('chat-top-btn')?.addEventListener('click', requestChatNotificationPermission);
     window.addEventListener('resize', updateNoticeMarquee);
 
     window.addEventListener('lyrics-ws-open', requestChatHistory);
