@@ -592,7 +592,8 @@ export function findSongObject(obj) {
 
 export function processQueueItem(item, index) {
     try {
-        const song = item.playlistPanelVideoRenderer;
+        const song = item.playlistPanelVideoRenderer ||
+            item.playlistPanelVideoWrapperRenderer?.primaryRenderer?.playlistPanelVideoRenderer;
         if (!song) {
             const possibleSong = findSongObject(item);
             if (possibleSong) {
@@ -601,6 +602,9 @@ export function processQueueItem(item, index) {
                 }
                 if (item._flairs) {
                     possibleSong._flairs = item._flairs;
+                }
+                if (item._isCurrentlyPlaying || item.selected === true || possibleSong.selected === true) {
+                    possibleSong._isCurrentlyPlaying = true;
                 }
                 return possibleSong;
             }
@@ -639,7 +643,7 @@ export function processQueueItem(item, index) {
             song._isCurrentlyPlaying = true;
         }
         // Preserve YouTube's own `selected` flag, authoritative even with duplicate videoIds.
-        if (song.selected === true) {
+        if (item.selected === true || song.selected === true) {
             song._isCurrentlyPlaying = true;
         }
         return song;
@@ -1393,15 +1397,15 @@ export function updateQueueFromData(data, source = 'websocket', songAddedFromSer
     }
 }
 
-export async function updateQueue() {
-    if (state.ws && state.ws.readyState === WebSocket.OPEN && state.processedQueueData && state.processedQueueData.length > 0) {
+export async function updateQueue(force = false) {
+    if (!force && state.ws && state.ws.readyState === WebSocket.OPEN && state.processedQueueData && state.processedQueueData.length > 0) {
         console.log('WebSocket is connected, skipping API fetch');
         return;
     }
 
     try {
         console.log('Fetching queue from API...');
-        const response = await fetch(`${API_URL}/queue`, {
+        const response = await fetch(`${API_URL}/queue${force ? '?fresh=1' : ''}`, {
             method: 'GET',
             headers: {
                 'Content-Type': 'application/json',

@@ -29,6 +29,7 @@ const {
     enrichQueueItemsWithIpInfo,
     fetchAllQueueItems,
     broadcastQueueUpdate,
+    annotateQueueDataWithCurrentPlaying,
     navigateQueue,
     navigateQueueWithConfirmation,
     startVideoIdCleanup,
@@ -85,6 +86,7 @@ setupRoutes(app, {
     enrichQueueItemsWithIpInfo,
     fetchAllQueueItems,
     broadcastQueueUpdate,
+    annotateQueueDataWithCurrentPlaying,
     navigateQueue,
     navigateQueueWithConfirmation,
     broadcast,
@@ -547,7 +549,8 @@ async function handleWebSocketMessageWrapper(message) {
         invalidateQueueCache,
         async () => fetchAllQueueItems(proxyRequest),
         async (items) => enrichQueueItemsWithIpInfo(items, getRandomNameForIp, normalizeIpAddress),
-        setQueueCache
+        setQueueCache,
+        async (queueData) => annotateQueueDataWithCurrentPlaying(queueData, proxyRequest)
     );
 }
 
@@ -579,6 +582,7 @@ startPolling({
         proxyRequest, 
         async (items) => enrichQueueItemsWithIpInfo(items, getRandomNameForIp, normalizeIpAddress)
     ),
+    annotateQueueDataWithCurrentPlaying: async (queueData) => annotateQueueDataWithCurrentPlaying(queueData, proxyRequest),
     extractVideoIdFromItem: require('./lib/queue-manager').extractVideoIdFromItem
 });
 

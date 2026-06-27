@@ -2,6 +2,18 @@ import { state } from './config.js';
 import { updateVolumeUI } from './navigation.js';
 import { logMessage, formatTime } from './utils.js';
 
+let queueRefreshAfterSongTimer = null;
+
+function requestQueueRefreshAfterSongChange() {
+    if (queueRefreshAfterSongTimer) {
+        clearTimeout(queueRefreshAfterSongTimer);
+    }
+    queueRefreshAfterSongTimer = setTimeout(() => {
+        queueRefreshAfterSongTimer = null;
+        if (window.updateQueue) window.updateQueue(true);
+    }, 250);
+}
+
 // WebSocket message handler moved from main.js
 export function handleWebSocketMessage(message) {
     switch (message.type) {
@@ -38,19 +50,23 @@ export function handleWebSocketMessage(message) {
                         if (item) item._isCurrentlyPlaying = false;
                     });
                     
-                    // Set the flag on the currently playing song
-                    // Use currentPlayingIndex if we have it and it matches
+                    // Keep an index only when it is already proven. Duplicate videoIds
+                    // require the backend queue's selected/current index.
                     if (Number.isInteger(state.currentPlayingIndex) && 
                         state.currentPlayingIndex >= 0 && 
                         state.currentPlayingIndex < state.processedQueueData.length &&
                         state.processedQueueData[state.currentPlayingIndex]?.videoId === message.data.videoId) {
                         state.processedQueueData[state.currentPlayingIndex]._isCurrentlyPlaying = true;
                     } else {
-                        // Find first match by videoId
-                        const matchIndex = state.processedQueueData.findIndex(item => item?.videoId === message.data.videoId);
-                        if (matchIndex !== -1) {
-                            state.processedQueueData[matchIndex]._isCurrentlyPlaying = true;
-                            state.currentPlayingIndex = matchIndex;
+                        const matches = state.processedQueueData
+                            .map((item, index) => item?.videoId === message.data.videoId ? index : -1)
+                            .filter(index => index !== -1);
+                        if (matches.length === 1) {
+                            state.processedQueueData[matches[0]]._isCurrentlyPlaying = true;
+                            state.currentPlayingIndex = matches[0];
+                        } else {
+                            state.currentPlayingIndex = null;
+                            requestQueueRefreshAfterSongChange();
                         }
                     }
                 }
