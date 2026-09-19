@@ -4,8 +4,7 @@ import { updateLyricsDisplay } from './lyric.js';
 
 const VOLUME_SEND_THROTTLE_MS = 120;
 const VOLUME_SEND_DEBOUNCE_MS = 180;
-const VOLUME_REMOTE_SYNC_GRACE_MS = 900;
-const VOLUME_REMOTE_EPSILON = 1;
+const VOLUME_CONFIRM_TIMEOUT_MS = 2500;
 const STREAM_VOLUME_LOCK_MESSAGE = 'Atur volume di speaker masing2 gan';
 let volumeControlsInitialized = false;
 let volumeSliderElement = null;
@@ -172,28 +171,12 @@ export async function toggleMute() {
 }
 
 // Volume control
-export function detectServerVolumeScale(value) {
-    if (typeof value !== 'number') return;
-    if (value > 0 && value < 1) {
-        state.serverVolumeScale = '0-1';
-    } else if (value > 100 && value <= 255) {
-        state.serverVolumeScale = '0-255';
-    } else {
-        state.serverVolumeScale = 'percent';
-    }
-}
-
 export function convertServerValueToPercent(value) {
-    if (state.serverVolumeScale === '0-1') return Math.round(value * 100);
-    if (state.serverVolumeScale === '0-255') return Math.round((value / 255) * 100);
-    return Math.round(value);
+    return normalizePercentValue(value);
 }
 
 export function convertPercentToServerValue(percent) {
-    const p = Math.max(0, Math.min(100, Math.round(percent)));
-    if (state.serverVolumeScale === '0-1') return +(p / 100).toFixed(3);
-    if (state.serverVolumeScale === '0-255') return Math.round((p / 100) * 255);
-    return p;
+    return normalizePercentValue(percent);
 }
 
 function getVolumeSlider() {
@@ -238,8 +221,8 @@ function restoreLockedVolumeSliderValue() {
 
 function normalizePercentValue(value) {
     const parsed = Number(value);
-    if (!Number.isFinite(parsed)) return 1;
-    return Math.max(1, Math.min(100, Math.round(parsed)));
+    if (!Number.isFinite(parsed)) return 0;
+    return Math.max(0, Math.min(100, Math.round(parsed)));
 }
 
 function setVolumeSliderPercent(percent, { force = false } = {}) {
@@ -261,13 +244,30 @@ function setVolumeSliderPercent(percent, { force = false } = {}) {
 }
 
 function shouldIgnoreRemoteVolumePercent(percent, { optimistic = false } = {}) {
+    const pendingTarget = state.volumePendingTarget;
+    if (pendingTarget === null) return false;
+
+    if (percent === pendingTarget) {
+        // A matching non-optimistic update confirms the upstream player.
+        if (!optimistic) {
+            state.volumePendingTarget = null;
+            state.volumePendingUntil = 0;
+        }
+        return false;
+    }
+
+    if (Date.now() < state.volumePendingUntil) return true;
+
+    // Confirmation never arrived (for example after a network failure). Allow
+    // authoritative remote state to reconcile the UI again.
+    state.volumePendingTarget = null;
+    state.volumePendingUntil = 0;
     return false;
 }
 
 function markLocalVolumeInteraction() {
     state.isUserAdjustingVolume = true;
     state.lastLocalVolumeUpdateMs = Date.now();
-    state.volumeRemoteSyncLockUntil = Date.now() + VOLUME_REMOTE_SYNC_GRACE_MS;
 }
 
 function finishLocalVolumeInteractionSoon(delayMs = 160) {
@@ -286,6 +286,8 @@ async function sendVolumePercentNow(percent) {
     lastVolumeSendStartedAt = Date.now();
     state.lastVolumeSentAt = lastVolumeSendStartedAt;
     state.lastVolumeSentValue = volumePercent;
+    state.volumePendingTarget = volumePercent;
+    state.volumePendingUntil = Date.now() + VOLUME_CONFIRM_TIMEOUT_MS;
 
     const sendVolume = convertPercentToServerValue(volumePercent);
 
@@ -326,6 +328,8 @@ async function sendVolumePercentNow(percent) {
 
 function scheduleVolumeSend(percent) {
     pendingVolumePercent = normalizePercentValue(percent);
+    state.volumePendingTarget = pendingVolumePercent;
+    state.volumePendingUntil = Date.now() + VOLUME_CONFIRM_TIMEOUT_MS;
 
     const now = Date.now();
     const elapsed = now - lastVolumeSendStartedAt;
@@ -363,10 +367,6 @@ export function updateVolumeUI(volume, options = {}) {
     }
 
     const optimistic = !!options.optimistic;
-    if (!optimistic) {
-        detectServerVolumeScale(volume);
-    }
-
     const percent = convertServerValueToPercent(volume);
     if (shouldIgnoreRemoteVolumePercent(percent, { optimistic })) {
         return;

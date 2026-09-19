@@ -60,7 +60,11 @@ const { CHAT_ENABLED, appendChatHistory, sendChatHistory, sendLatestNotice, hand
 // Floating Lyrics process detection/control is handled server-side (local machine).
 const { startPolling } = require('./lib/polling');
 const { setupRoutes } = require('./lib/routes');
-const { setVolume: setVolumeManaged, toggleMute: toggleMuteManaged } = require('./lib/volume-manager');
+const {
+    setVolume: setVolumeManaged,
+    toggleMute: toggleMuteManaged,
+    normalizeVolume
+} = require('./lib/volume-manager');
 
 const app = new Hono();
 const PORT = process.env.PORT || 80;
@@ -468,8 +472,8 @@ wss.on('connection', (ws, req) => {
                 });
                 broadcastPlaybackChatLog(active ? 'started stream audio' : 'stopped stream audio');
             } else if (message.type === 'set_volume' || message.type === 'volume') {
-                const volume = message.volume !== undefined ? parseInt(message.volume) : null;
-                if (volume === null || isNaN(volume) || volume < 0 || volume > 100) {
+                const volume = normalizeVolume(message.volume);
+                if (volume === null) {
                     ws.send(JSON.stringify({
                         type: 'volume_error',
                         error: 'Volume must be a number between 0 and 100'

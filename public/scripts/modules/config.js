@@ -57,14 +57,13 @@ export const state = {
     // Volume
     isUserAdjustingVolume: false,
     lastLocalVolumeUpdateMs: 0,
-    serverVolumeScale: 'percent',
     volumePercent: 0,
     volumeLastServerValue: null,
     volumeLastServerPercent: null,
-    volumeRemoteSyncLockUntil: 0,
+    volumePendingTarget: null,
+    volumePendingUntil: 0,
     lastVolumeSentAt: 0,
     lastVolumeSentValue: null,
-    volumeDebounceTimer: null,
     
     // Mobile
     mobileSection: 'right'

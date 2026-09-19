@@ -5,6 +5,7 @@
   "main": "bundle.js",
   "bin": "bundle.js",
   "scripts": {
+    "test": "node --test test/*.test.js",
     "dev": "nodemon server.js",
     "build:bundle": "esbuild server.js --bundle --platform=node --outfile=bundle.js --external:kuromoji",
     "build": "npm run build:bundle && pkg . --targets node18-win-x64 --output dist/ytm-share-server.exe",
